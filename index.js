@@ -15223,6 +15223,7 @@
             '.tm-bind-search{display:flex;align-items:center;gap:10px;padding:11px 14px;margin:10px 0;border:1px solid rgba(127,127,127,.22);border-radius:999px;background:var(--tm-control-bg,rgba(127,127,127,.06));}.tm-bind-search:focus-within{border-color:var(--SmartThemeQuoteColor,#777);box-shadow:0 0 0 3px rgba(127,127,127,.1);}.tm-bind-search i{opacity:.55;}.tm-bind-search input{flex:1;min-width:0;border:0;background:transparent;outline:0;color:inherit;font:inherit;}',
             '.tm-bg-bind-options{max-height:250px;overflow:auto;overscroll-behavior:contain;}.tm-bg-bind-row{display:flex;align-items:center;justify-content:space-between;gap:12px;width:100%;min-height:48px;padding:10px 12px;margin:5px 0;border:var(--tm-control-border-style,1px solid rgba(127,127,127,.15));border-radius:var(--tm-control-radius,8px);background:var(--tm-control-bg,rgba(127,127,127,.05));color:inherit;text-align:left;}.tm-bg-bind-row>span{min-width:0;overflow-wrap:anywhere;flex:1;}.tm-bg-bind-row small{display:block;opacity:.55;font-size:.75em;margin-top:4px;}.tm-bg-bind-row>button{flex-shrink:0;}',
             '.tm-bg-edit-name{padding:12px 14px;border-radius:var(--tm-control-radius,8px);background:var(--tm-control-bg,rgba(127,127,127,.08));overflow-wrap:anywhere;}.tm-bg-edit-preview{display:block;width:100%;max-height:260px;object-fit:contain;border-radius:var(--tm-control-radius,8px);background:var(--tm-control-bg,rgba(127,127,127,.06));}.tm-bg-library-footer>.tm-icon-btn{background:transparent !important;border:0 !important;border-radius:0;}.tm-app-page-backgrounds>.tm-search-bar{flex-shrink:0;}',
+            '.tm-upload-category-row{display:flex;gap:8px;align-items:center;}.tm-upload-category-row select{flex:1;min-width:0;}.tm-upload-category-row button{flex:0 0 46px;min-height:44px;padding:0;}
             '.tm-bg-library-actions{display:flex;flex-direction:column;gap:12px;}.tm-bg-library-actions select{display:block;width:100%;min-height:44px;}.tm-bg-library-original{display:block;max-width:100%;max-height:75vh;object-fit:contain;margin:auto;}',
             '.tm-app-placeholder{width:min(100%,360px);display:flex;flex-direction:column;align-items:center;text-align:center;gap:7px;padding:28px 20px;border:1px dashed var(--tm-control-border,rgba(127,127,127,.18));border-radius:var(--tm-panel-radius,16px);background:var(--tm-control-bg,rgba(127,127,127,.05));box-sizing:border-box;}',
             '.tm-app-placeholder>i{font-size:2em;color:var(--SmartThemeQuoteColor,#7c6daf);opacity:.72;margin-bottom:4px;}',
@@ -20737,9 +20738,22 @@
             var batchPrefix = '背景-' + new Date().toISOString().slice(0,19).replace(/[:T]/g,'-');
             var sheet = createSheet('<div class="tm-sheet-title">上传 ' + files.length + ' 张背景</div>' +
                 '<div class="tm-field"><label>统一名称</label><input type="text" data-upload-name value="' + esc(batchPrefix) + '"><div class="tm-hint">自动添加序号，避免覆盖已有图片。背景保留原图。</div></div>' +
-                '<div class="tm-field"><label>导入分类</label><select data-upload-category><option value="">未分类</option>' + backgroundLibraryData().categories.map(function (name) {
+                '<div class="tm-field"><label>分组 / 标签</label><div class="tm-upload-category-row"><select data-upload-category><option value="">未分类</option>' + backgroundLibraryData().categories.map(function (name) {
                     return '<option value="' + esc(name) + '">' + esc(name) + '</option>';
-                }).join('') + '</select></div><p data-upload-status role="status"></p><button class="tm-btn" data-upload-start>开始上传</button>');
+                }).join('') + '</select><button type="button" class="tm-btn tm-btn-outline" data-upload-new-category title="新建分组"><i class="fa-solid fa-folder-plus"></i></button></div><div class="tm-hint">上传后会把所选分组保存到背景标注中。</div></div><p data-upload-status role="status"></p><button class="tm-btn" data-upload-start>开始上传</button>');
+            sheet.querySelector('[data-upload-new-category]').onclick = function () {
+                var category = global.prompt('新建背景分组 / 标签');
+                if (!category || !category.trim() || /^__.*__$/.test(category.trim())) return;
+                category = category.trim();
+                var current = load(), library = current.backgroundLibrary || {};
+                current.backgroundLibrary = { categories: Array.from(new Set((Array.isArray(library.categories) ? library.categories : []).concat(category))), meta: library.meta || {} };
+                Promise.resolve(save(current)).then(function () {
+                    var select = sheet.querySelector('[data-upload-category]');
+                    select.insertAdjacentHTML('beforeend', '<option value="' + esc(category) + '">' + esc(category) + '</option>');
+                    select.value = category;
+                    toast('分组已创建');
+                }).catch(function () { toast('分组保存失败', true); });
+            };
             sheet.querySelector('[data-upload-start]').onclick = async function () {
                 var button = this; if (backgroundPageState.uploading) return;
                 var prefix = sheet.querySelector('[data-upload-name]').value.trim().replace(/[\\/<>:"|?*\x00-\x1f]/g,'-').slice(0,100);
