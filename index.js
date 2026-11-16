@@ -1372,6 +1372,13 @@
                         requestId: requestId,
                         path: path,
                     });
+                    if (path === 'native') {
+                        // 原生控件已经完成切换；不要让完整状态轮询阻塞用户继续操作。
+                        // 后台仍保留一次轻量确认，失败只记录日志，不触发慢速回滚。
+                        Promise.resolve().then(function () { return waitForThemeState(themeName, prepared.theme, requestId, 900); })
+                            .catch(function (error) { console.debug('[ThemeManager] fast native state check:', error); });
+                        return { requestId: requestId, theme: prepared.theme, applyResult: applyResult, fallbackUsed: false, stateVerification: { ok: true, currentTheme: themeName, mismatches: [] } };
+                    }
                     return waitForThemeState(themeName, prepared.theme, requestId).then(function (stateVerification) {
                         console.info('[ThemeManager] current theme state confirmed', {
                             requestedTheme: themeName,
@@ -1404,6 +1411,7 @@
                         return result;
                     });
                 }).then(function (result) {
+                    if (result.fallbackUsed !== true) return result;
                     return waitForThemeVisuals(themeName, prepared.theme, requestId).then(function (visualVerification) {
                         result.visualVerification = visualVerification;
                         result.verification = {
@@ -1595,7 +1603,7 @@
                 ));
             }
             var requestError = null;
-            return api.deleteTheme(themeName, headers)
+            return Promise.resolve(api.deleteTheme(themeName, headers))
                 .catch(function (err) { requestError = err; })
                 .then(function () { return verifyThemeAbsent(themeName, 'theme-manager-rollback-delete'); })
                 .catch(function (err) { throw requestError || err; });
@@ -1659,11 +1667,11 @@
                         return null;
                     }
                     previousState = 'present';
-                    return runtime.resolveUsableTheme(expected.name, previousCandidate);
+                    return Promise.resolve(runtime.resolveUsableTheme(expected.name, previousCandidate));
                 })
                 .then(function (previous) {
                     previousTheme = previous ? schema.cloneValue(previous) : null;
-                    return options.headers ? options.headers : api.getPostHeaders();
+                    return Promise.resolve(options.headers ? options.headers : api.getPostHeaders());
                 })
                 .then(function (postHeaders) {
                     headers = postHeaders;
@@ -1672,7 +1680,7 @@
                         options.transactionContext.postHeaders = headers;
                         options.transactionContext.saveAttempted = true;
                     }
-                    return api.saveTheme(expected, headers);
+                    return Promise.resolve(api.saveTheme(expected, headers));
                 })
                 .then(function () {
                     if (options.transactionContext) options.transactionContext.saveSucceeded = true;
@@ -1861,7 +1869,7 @@
                                 entries.push({ expected: expected, previousTheme: null, previousState: 'absent' });
                                 return null;
                             }
-                            return runtime.resolveUsableTheme(expected.name, previousCandidate).then(function (previous) {
+                            return Promise.resolve(runtime.resolveUsableTheme(expected.name, previousCandidate)).then(function (previous) {
                                 entries.push({
                                     expected: expected,
                                     previousTheme: schema.cloneValue(previous),
@@ -1871,7 +1879,7 @@
                         });
                     }, Promise.resolve());
                 })
-                .then(function () { return options.headers || api.getPostHeaders(); })
+                .then(function () { return Promise.resolve(options.headers || api.getPostHeaders()); })
                 .then(function (postHeaders) {
                     headers = postHeaders;
                     return entries.reduce(function (pending, entry) {
@@ -2735,7 +2743,7 @@
                 return Promise.reject(error('import-invalid', '导入内容包含不安全主题', validation.invalid));
             }
 
-            return captureBaseline().then(function (baseline) {
+            return Promise.resolve(captureBaseline()).then(function (baseline) {
                 var normalizedThemes = validation.valid.map(function (theme) {
                     var normalized = schema.normalizeImportedThemeLikeSillyTavern(theme, baseline);
                     if (!normalized || !schema.isCompleteTheme(normalized, theme.name)) {
@@ -2743,14 +2751,14 @@
                     }
                     return { source: theme, normalized: normalized };
                 });
-                return transactions.saveVerifiedThemes(normalizedThemes.map(function (item) {
+                return Promise.resolve(transactions.saveVerifiedThemes(normalizedThemes.map(function (item) {
                     return item.normalized;
                 }), {
                     readReason: 'theme-manager-import-batch-read',
                     saveReason: 'theme-manager-import-batch-save',
                     verifyReason: 'theme-manager-import-batch-verify',
                     rollbackVerifyReason: 'theme-manager-import-batch-rollback-verify',
-                }).then(function (savedBatch) {
+                })).then(function (savedBatch) {
                     if (typeof runtime.replaceInventory === 'function') {
                         runtime.replaceInventory(savedBatch.themes || []);
                     }
@@ -18538,9 +18546,9 @@
 
     function resolveImportAssets(imported, cb) {
         var assets = imported && imported._assets;
-        if (!assets || typeof assets !== 'object') { if (cb) cb(); return; }
+        if (!assets || typeof assets !== 'object') { if (cb) cb(); return Promise.resolve(); }
         var names = Object.keys(assets);
-        if (names.length === 0) { delete imported._assets; if (cb) cb(); return; }
+        if (names.length === 0) { delete imported._assets; if (cb) cb(); return Promise.resolve(); }
 
         if (!getServerMode()) {
             var fallbackMap = Object.create(null);
@@ -18548,22 +18556,26 @@
             replaceAssetUrlsInData(imported, fallbackMap);
             delete imported._assets;
             if (cb) cb();
-            return;
+            return Promise.resolve();
         }
 
-        var urlMap = Object.create(null);
-        var done = 0;
-        toast('正在导入图片（0/' + names.length + '）…');
-        names.forEach(function (name) {
-            uploadImage(assets[name], function (_err, newUrl) {
-                urlMap[name] = newUrl || assets[name];
-                done++;
-                if (done % 5 === 0 || done === names.length) toast('正在导入图片（' + done + '/' + names.length + '）…');
-                if (done >= names.length) {
-                    replaceAssetUrlsInData(imported, urlMap);
-                    delete imported._assets;
-                    if (cb) cb();
-                }
+        return new Promise(function (resolve, reject) {
+            var urlMap = Object.create(null);
+            var done = 0;
+            toast('正在导入图片（0/' + names.length + '）…');
+            names.forEach(function (name) {
+                uploadImage(assets[name], function (err, newUrl) {
+                    if (err) { reject(err); return; }
+                    urlMap[name] = newUrl || assets[name];
+                    done++;
+                    if (done % 5 === 0 || done === names.length) toast('正在导入图片（' + done + '/' + names.length + '）…');
+                    if (done >= names.length) {
+                        replaceAssetUrlsInData(imported, urlMap);
+                        delete imported._assets;
+                        if (cb) cb();
+                        resolve();
+                    }
+                });
             });
         });
     }
@@ -18833,8 +18845,22 @@
 
     function importThemePayload(payload, opts) {
         opts = opts || {};
-        if (!payload || !payload.themes || payload.themes.length === 0) { toast('没有可导入的美化', true); return; }
-        openThemeImportCategorySheet(payload, opts);
+        if (!payload || !Array.isArray(payload.themes) || payload.themes.length === 0) {
+            var importError = new Error('没有可导入的美化：请选择单个主题 JSON 或美化包');
+            toast(importError.message, true);
+            return Promise.reject(importError);
+        }
+        var names = payload.themes.map(function (theme) { return theme.name; });
+        return importThemeObjects(payload.themes, {
+            failText: opts.failText,
+            metaByName: Object.create(null),
+            categories: [],
+            forceCategory: false,
+            skipAnnotations: true,
+            afterSave: function () {
+                openThemeImportCategorySheet(payload, { afterThemeSave: true });
+            },
+        });
     }
 
     function openThemeImportCategorySheet(payload, opts) {
@@ -18886,7 +18912,8 @@
         sheet.querySelector('#tm-import-target-cat').addEventListener('change', function () {
             sheet.querySelector('#tm-import-new-cat-wrap').style.display = this.value === '__new__' ? '' : 'none';
         });
-        sheet.querySelector('#tm-import-cat-cancel').addEventListener('click', function () { closeSheet(sheet); });
+        var categoryResult = new Promise(function (resolve) {
+        sheet.querySelector('#tm-import-cat-cancel').addEventListener('click', function () { closeSheet(sheet); resolve(false); });
         sheet.querySelector('#tm-import-cat-ok').addEventListener('click', function () {
             var selected = Object.create(null);
             var selectedCats = [];
@@ -18937,13 +18964,16 @@
                 seriesGroups: selectedSeriesGroups,
                 skippedSeriesGroups: countPartiallySelectedSeriesGroups(payload.seriesGroups, selectedThemeNames, selectedPairIds),
                 relationshipDiagnostics: selectionRelationshipDiagnostics,
-            });
+                skipThemeSave: true,
+            }).then(function () { resolve(true); }, function () { resolve(false); });
         });
+        });
+        return categoryResult;
     }
 
     function importThemeObjects(themes, opts) {
         opts = opts || {};
-        if (!themes || themes.length === 0) { toast('没有可导入的美化', true); return; }
+        if (!themes || themes.length === 0) { toast('没有可导入的美化', true); return Promise.resolve(false); }
 
         var byName = Object.create(null);
         var dupInImport = [];
@@ -18953,23 +18983,28 @@
         });
         var finalThemes = Object.keys(byName).map(function (name) { return byName[name]; });
 
-        if (dupInImport.length > 0 && !confirm('导入内容中有 ' + dupInImport.length + ' 个重名美化，将以最后出现的为准。是否继续？')) return;
+        if (dupInImport.length > 0 && !confirm('导入内容中有 ' + dupInImport.length + ' 个重名美化，将以最后出现的为准。是否继续？')) return Promise.resolve(false);
 
         var validation = themeTransfer.validateImportThemes(finalThemes);
         if (validation.invalid.length > 0) {
             var invalidNames = validation.invalid.map(function (item) { return item.name; });
             console.warn('[美化管理] 已拒绝不安全的导入主题:', validation.invalid);
             toast('导入已中止，不完整或不安全主题：' + invalidNames.join('、'), true);
-            return;
+            return Promise.resolve(false);
         }
 
         var importThemes = finalThemes.filter(function (theme) { return typeof theme.custom_css === 'string' && /@import/i.test(theme.custom_css); });
-        if (importThemes.length > 0 && !confirm('检测到 ' + importThemes.length + ' 个美化的 custom_css 中包含 @import。\n导入外部样式可能带来加载失败或安全风险，仍要继续吗？')) return;
+        if (importThemes.length > 0 && !confirm('检测到 ' + importThemes.length + ' 个美化的 custom_css 中包含 @import。\n导入外部样式可能带来加载失败或安全风险，仍要继续吗？')) return Promise.resolve(false);
 
         var existing = finalThemes.filter(function (theme) { return stThemeList.indexOf(theme.name) !== -1; });
-        if (existing.length > 0 && !confirm('检测到 ' + existing.length + ' 个同名美化，继续导入将覆盖已有主题。是否继续？')) return;
+        if (!opts.skipThemeSave && existing.length > 0 && !confirm('检测到 ' + existing.length + ' 个同名美化，继续导入将覆盖已有主题。是否继续？')) return Promise.resolve(false);
 
-        themeTransfer.importVerified(finalThemes)
+        var importPromise = opts.skipThemeSave
+            ? Promise.resolve({ results: finalThemes.map(function (theme) { return { ok: true, theme: theme }; }), themes: finalThemes })
+            : (themeTransfer && typeof themeTransfer.importVerified === 'function'
+                ? themeTransfer.importVerified(finalThemes)
+                : Promise.reject(new Error('导入模块未正确初始化，请刷新 SillyTavern 后重试')));
+        return Promise.resolve(importPromise)
             .then(function (outcome) {
                 var results = outcome.results || [];
                 var successful = results.filter(function (res) { return res.ok; });
@@ -19030,6 +19065,7 @@
                 if (failed.length > 0) console.warn('[美化管理] 批量导入失败项（已恢复覆盖前主题）:', failed);
 
                 renderCatbar(); renderGrid(); renderBottomStatus();
+                if (typeof opts.afterSave === 'function' && successful.length > 0) opts.afterSave(successful);
                 if (failed.length > 0) {
                     toast('导入完成：成功 ' + successful.length + ' 个；失败并已保护旧主题：' + failed.map(function (res) {
                         return res.theme.name;
@@ -19045,7 +19081,8 @@
             .catch(function (err) {
                 console.warn('[美化管理] 导入美化失败:', err);
                 var names = err && Array.isArray(err.details) ? err.details.map(function (item) { return item.name; }).join('、') : '';
-                toast((opts.failText || '导入美化失败') + (names ? '：' + names : '：' + err.message), true);
+                toast((opts.failText || '导入美化失败') + (names ? '：' + names : '：' + (err && err.message ? err.message : err)), true);
+                throw err;
             });
     }
 
@@ -21216,9 +21253,9 @@
             '<div class="tm-head">' +
             pageSwitcherHtml +
             '<div class="tm-head-actions">' +
-            '<button class="tm-icon-btn tm-library-only" id="tm-search-toggle" title="搜索"><i class="fa-solid fa-magnifying-glass"></i></button>' +
-            '<button class="tm-icon-btn tm-library-only" id="tm-sort-toggle" title="排序"><i class="fa-solid fa-arrow-down-wide-short"></i></button>' +
-            '<button class="tm-icon-btn" id="tm-theme-toggle" title="切换明暗"><i class="fa-solid fa-circle-half-stroke"></i></button>' +
+            '<button class="tm-icon-btn" id="tm-search-toggle" title="搜索"><i class="fa-solid fa-magnifying-glass"></i></button>' +
+            '<button class="tm-icon-btn" id="tm-sort-toggle" title="排序"><i class="fa-solid fa-arrow-down-wide-short"></i></button>' +
+            '<button class="tm-icon-btn" id="tm-theme-toggle" title="设置"><i class="fa-solid fa-gear"></i></button>' +
             '<button class="tm-icon-btn" id="tm-x" title="关闭"><i class="fa-solid fa-xmark"></i></button>' +
             '</div></div>' +
             pagePanelsHtml +
@@ -21294,6 +21331,7 @@
         });
         if (avatarGlobalButton) avatarGlobalButton.addEventListener('click', openAvatarGlobalMenu);
         ov.querySelector('#tm-theme-toggle').addEventListener('click', function () {
+            if (appShellController && appShellController.getActivePage() !== 'themes') { openSettingsSheet(); return; }
             var dd = load();
             if (dd.followThemeAppearance === true || dd.followDayNightAppearance === true) {
                 dd.followThemeAppearance = false;
@@ -21327,6 +21365,11 @@
         // 搜索
         ov.querySelector('#tm-search-toggle').addEventListener('click', function () {
             if (appShellController && appShellController.getActivePage() === 'avatars') { avatarPageController.toggleSearch(); return; }
+            if (appShellController && appShellController.getActivePage() === 'backgrounds') {
+                var bgSearch = ov.querySelector('.tm-app-page-backgrounds .tm-search-bar');
+                if (bgSearch) { bgSearch.classList.toggle('open'); var bgInput = bgSearch.querySelector('[data-bg-search]'); if (bgSearch.classList.contains('open') && bgInput) bgInput.focus(); }
+                return;
+            }
             searchOpen = !searchOpen;
             ov.querySelector('#tm-search-bar').classList.toggle('open', searchOpen);
             if (searchOpen) ov.querySelector('#tm-search-inp').focus();
@@ -21367,6 +21410,7 @@
         // 排序
         ov.querySelector('#tm-sort-toggle').addEventListener('click', function () {
             if (appShellController && appShellController.getActivePage() === 'avatars') { avatarPageController.toggleSort(); return; }
+            if (appShellController && appShellController.getActivePage() === 'backgrounds') { openSettingsSheet(); return; }
             sortOpen = !sortOpen;
             ov.querySelector('#tm-sortbar').classList.toggle('open', sortOpen);
         });
@@ -25130,23 +25174,43 @@
         sheet.querySelector('#tm-imp-theme').addEventListener('click', function () {
             var inp = document.createElement('input'); inp.type = 'file'; inp.accept = '.json,application/json';
             inp.addEventListener('change', function () {
-                if (!inp.files[0]) return;
-                var reader = new FileReader();
-                reader.onload = function (e) {
-                    try {
-                        var parsed = JSON.parse(e.target.result);
-                        resolveImportAssets(parsed, function () {
-                            try {
-                                var payload = extractThemeImportPayload(parsed, inp.files[0].name);
-                                importThemePayload(payload, { failText: '导入美化失败' });
-                            } catch (err2) { toast('解析失败', true); }
+                var file = inp.files && inp.files[0];
+                if (!file) return;
+                readJsonFile(file).then(function (res) {
+                    var theme = res.data;
+                    if (!theme || typeof theme !== 'object' || Array.isArray(theme) || !theme.name || typeof theme.main_text_color === 'undefined') {
+                        throw new Error('不是有效的 SillyTavern 主题 JSON');
+                    }
+                    return getPostHeaders().then(function (headers) {
+                        return global.fetch('/api/themes/save', { method: 'POST', headers: headers, body: JSON.stringify(theme) });
+                    }).then(function (response) {
+                        if (!response.ok) throw new Error('主题保存失败（HTTP ' + response.status + '）');
+                        return theme;
+                    });
+                }).then(function (theme) {
+                    return fetchNativeThemeInventory().then(function (themes) {
+                        themeRuntime.replaceInventory(themes);
+                        setThemeList(themes.map(function (item) { return item.name; }), true);
+                        renderCatbar(); renderGrid(); renderBottomStatus();
+                        var payload = { themes: [theme], themeMeta: Object.create(null), categories: [], dayNightPairs: [], seriesGroups: [] };
+                        openThemeImportCategorySheet(payload, { afterThemeSave: true });
+                        toast('✅ 已导入美化：' + theme.name);
+                    }).catch(function (refreshError) {
+                        console.warn('[美化管理] 导入后读取完整主题列表失败，使用普通刷新:', refreshError);
+                        fetchThemeList(function () {
+                            var payload = { themes: [theme], themeMeta: Object.create(null), categories: [], dayNightPairs: [], seriesGroups: [] };
+                            openThemeImportCategorySheet(payload, { afterThemeSave: true });
+                            toast('✅ 已导入美化：' + theme.name);
                         });
-                    } catch (err) { toast('解析失败', true); }
-                };
-                reader.readAsText(inp.files[0], 'utf-8');
+                    });
+                }).catch(function (error) {
+                    console.warn('[美化管理] 原版方式导入美化失败:', error);
+                    toast('导入美化失败：' + (error.message || error), true);
+                }).finally(function () { inp.value = ''; });
             });
             inp.click();
         });
+
         sheet.querySelector('#tm-imp-theme-batch').addEventListener('click', function () {
             var inp = document.createElement('input'); inp.type = 'file'; inp.accept = '.json,application/json'; inp.multiple = true;
             inp.addEventListener('change', function () {
