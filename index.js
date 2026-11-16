@@ -8588,8 +8588,8 @@
 (function (global) {
     var ns = global.ThemeMgrModules = global.ThemeMgrModules || {};
     var SERVER_BASE = '/api/plugins/theme-manager';
-    var CACHE_DB_NAME = 'theme_mgr_avatar_cache_db';
-    var CONTROL_DB_NAME = 'theme_mgr_avatar_sync_db';
+    var CACHE_DB_NAME = 'theme_manager_custom_avatar_cache_db';
+    var CONTROL_DB_NAME = 'theme_manager_custom_avatar_sync_db';
     var CONTROL_DB_VERSION = 1;
     var CONTROL_STORE = 'state';
     var CONTROL_KEY = 'remote-authority';
@@ -10422,9 +10422,9 @@
 /* BEGIN MODULE 20/29: src/avatar-transfer.js | sha256:34024c03ad6beaded612b5c7143bb2853785dad55eedfdec44d2d0efb32de531 */
 (function (global) {
     var ns = global.ThemeMgrModules = global.ThemeMgrModules || {};
-    var BACKUP_FORMAT = 'theme-mgr-avatar-backup';
+    var BACKUP_FORMAT = 'theme-manager-custom-avatar-backup';
     var BACKUP_VERSION = 1;
-    var IMAGE_EXPORT_FORMAT = 'theme-mgr-avatar-image-export-index';
+    var IMAGE_EXPORT_FORMAT = 'theme-manager-custom-avatar-image-export-index';
     var IMAGE_EXPORT_VERSION = 1;
     var MiB = 1024 * 1024;
     var DEFAULT_LIMITS = {
@@ -11167,7 +11167,7 @@
                         if (!sameSourceStamp(beforeStamp, after[0]) || beforeCore.hash !== after[1].hash || beforeLibrary.hash !== after[2].hash) {
                             throw makeError('AVATAR_EXPORT_SOURCE_CHANGED', '头像数据在完整备份期间发生变化，已中止，请重试');
                         }
-                        var filename = downloadName('theme-mgr-avatar-backup', '.zip');
+                        var filename = downloadName('theme-manager-custom-avatar-backup', '.zip');
                         return Promise.resolve(download(built.blob, filename)).then(function () {
                             return { filename: filename, count: built.inventory.assets.length, bytes: built.blob.size, source: clone(built.manifest.source), manifestFingerprint: built.manifest.manifestFingerprint };
                         });
@@ -16634,7 +16634,7 @@
 
     var SCRIPT_NAME = '美化管理';
     var LAUNCHER_NAME = '美化管理器';
-    var BTN_ID = 'theme-mgr-ext-btn';
+    var BTN_ID = 'theme-manager-custom-ext-btn';
     var DB_NAME = 'theme_mgr_db';
     var DB_VERSION = 1;
     var STORE_NAME = 'data';
@@ -16786,13 +16786,13 @@
     var stThemeList = [];
     function readThemeInventoryCache() {
         try {
-            var raw = sessionStorage.getItem('theme-mgr-theme-inventory-v1');
+            var raw = sessionStorage.getItem('theme-manager-custom-theme-inventory-v1');
             var list = raw ? JSON.parse(raw) : [];
             return Array.isArray(list) ? list.filter(function (name) { return typeof name === 'string' && name.trim(); }) : [];
         } catch (_) { return []; }
     }
     function writeThemeInventoryCache(list) {
-        try { sessionStorage.setItem('theme-mgr-theme-inventory-v1', JSON.stringify(list || [])); } catch (_) {}
+        try { sessionStorage.setItem('theme-manager-custom-theme-inventory-v1', JSON.stringify(list || [])); } catch (_) {}
     }
     var stThemeListReliable = false;
     var themeNameConflicts = new Set();
@@ -16891,7 +16891,7 @@
             themeSchema = modules.themeSchema;
             themeApi = modules.createThemeApi({ schema: themeSchema });
             extensionUpdater = modules.createExtensionUpdater({
-                extensionName: 'theme-mgr',
+                extensionName: 'theme-manager-custom',
                 trustedRemotes: ['https://github.com/qishiwan16-hub/theme-manager-custom'],
                 getPostHeaders: getPostHeaders,
                 onStateChange: function () {
@@ -24293,7 +24293,7 @@
                         var reportText = prepared.report.legacyCount > 0
                             ? '，兼容补齐 ' + prepared.report.legacyCount + ' 个旧主题的 ' + prepared.report.filledFieldCount + ' 个字段'
                             : '';
-                        downloadJsonFile('theme-mgr-' + safeName + '-' + new Date().toISOString().slice(0, 10) + '.json', bundle, function (assetCount) {
+                        downloadJsonFile('theme-manager-custom-' + safeName + '-' + new Date().toISOString().slice(0, 10) + '.json', bundle, function (assetCount) {
                             toast('✅ 已安全导出「' + catName + '」：' + prepared.themes.length + ' 个' + reportText +
                                 (assetCount ? '，含 ' + assetCount + ' 张图片' : '') +
                                 (skippedSeriesCount ? '；' + skippedSeriesCount + ' 个系列因成员不完整未附带关系' : ''));
@@ -25039,7 +25039,7 @@
         });
         sheet.querySelector('#tm-exp').addEventListener('click', function () {
             var d2 = load();
-            downloadJsonFile('theme-mgr-data-' + new Date().toISOString().slice(0, 10) + '.json', d2, function (assetCount) {
+            downloadJsonFile('theme-manager-custom-data-' + new Date().toISOString().slice(0, 10) + '.json', d2, function (assetCount) {
                 toast('✅ 已导出' + (assetCount ? '（含 ' + assetCount + ' 张图片）' : ''));
             });
         });
@@ -25135,7 +25135,7 @@
                     var reportText = prepared.report.legacyCount > 0
                         ? '，兼容补齐 ' + prepared.report.legacyCount + ' 个旧主题的 ' + prepared.report.filledFieldCount + ' 个字段'
                         : '';
-                    downloadJsonFile('theme-mgr-themes-' + new Date().toISOString().slice(0, 10) + '.json', bundle, function (assetCount) {
+                    downloadJsonFile('theme-manager-custom-themes-' + new Date().toISOString().slice(0, 10) + '.json', bundle, function (assetCount) {
                         toast('✅ 已安全导出美化包：' + prepared.themes.length + ' 个' + reportText +
                             (assetCount ? '，含 ' + assetCount + ' 张图片' : '') +
                             (skippedSeriesCount ? '；' + skippedSeriesCount + ' 个系列因成员不完整未附带关系' : ''));
