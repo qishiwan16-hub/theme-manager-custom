@@ -15845,8 +15845,25 @@
         }
 
         var backgroundListRequest = null;
+        function readNativeBackgroundNames() {
+            var names = [];
+            try {
+                var root = document.getElementById('bg_menu_content');
+                if (!root) return names;
+                root.querySelectorAll('.bg_example').forEach(function (item) {
+                    var name = item.getAttribute('bgfile') || (item.dataset && (item.dataset.bg || item.dataset.filename));
+                    if (name && names.indexOf(name) === -1) names.push(name);
+                });
+            } catch (_) {}
+            return names.sort(function (a, b) { return a.localeCompare(b); });
+        }
         function getBackgroundList(cb, force) {
             if (backgroundListCache && !force) { cb(backgroundListCache); return; }
+            var nativeNames = readNativeBackgroundNames();
+            if (nativeNames.length && (!backgroundListCache || force)) {
+                backgroundListCache = nativeNames;
+                cb(nativeNames);
+            }
             if (!backgroundListRequest) {
                 backgroundListRequest = global.fetch('/api/plugins/theme-manager-custom/backgrounds', {
                     credentials: 'same-origin', cache: 'no-cache',
@@ -15870,7 +15887,7 @@
                     return backgroundListCache;
                 }).catch(function (error) {
                     console.warn('[美化管理] 读取背景列表失败:', error);
-                    return backgroundListCache || [];
+                    return backgroundListCache || nativeNames;
                 }).then(function (names) {
                     backgroundListRequest = null;
                     return names;
