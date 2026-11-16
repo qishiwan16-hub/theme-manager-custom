@@ -17612,6 +17612,24 @@
         });
     }
 
+    function fetchNativeThemeInventory() {
+        return getPostHeaders().then(function (headers) {
+            return global.fetch('/api/settings/get', {
+                method: 'POST', headers: headers, body: JSON.stringify({}), cache: 'no-cache',
+            });
+        }).then(function (response) {
+            if (!response.ok) throw new Error('native settings ' + response.status);
+            return response.json();
+        }).then(function (payload) {
+            var themes = payload && Array.isArray(payload.themes) ? payload.themes : [];
+            themes = themes.filter(function (theme) {
+                return theme && typeof theme === 'object' && typeof theme.name === 'string' && theme.name.trim();
+            });
+            if (!themes.length) throw new Error('native themes response empty');
+            return themes;
+        });
+    }
+
     function fetchThemeList(cb, retryCount) {
         retryCount = Number(retryCount) || 0;
         var found = false;
@@ -17697,20 +17715,12 @@
         fetchCustomThemeInventory().then(function (themes) {
             finishWithInventory(themes, '/api/plugins/theme-manager-custom/themes + #themes');
         }).catch(function (customError) {
-            if (!themeApi || typeof themeApi.getSettingsInventory !== 'function') {
-                fallbackToExactControl(customError);
-                return;
-            }
-            themeApi.getSettingsInventory({
-                allowDuplicateNames: true,
-                onDiagnostics: function (items) { diagnostics = items.slice(); },
-            }).then(function (themes) {
-                if (!Array.isArray(themes) || !themes.length) {
-                    fallbackToExactControl(new Error('主题库存接口返回空列表'));
-                    return;
-                }
+            // 与背景列表一致：没有二改后端时直接读取酒馆原生主题接口。
+            fetchNativeThemeInventory().then(function (themes) {
                 finishWithInventory(themes, '/api/settings/get + #themes');
-            }).catch(fallbackToExactControl);
+            }).catch(function (nativeError) {
+                fallbackToExactControl(nativeError || customError);
+            });
         });
     }
 
