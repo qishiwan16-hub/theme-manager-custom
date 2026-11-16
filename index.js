@@ -17634,8 +17634,8 @@
         retryCount = Number(retryCount) || 0;
         var found = false;
 
-        function done(list, method, reliable, diagnostics) {
-            if (found) return;
+        function done(list, method, reliable, diagnostics, allowUpdate) {
+            if (found && allowUpdate !== true) return;
             found = true;
             var conflictCounts = Object.create(null);
             (Array.isArray(diagnostics) ? diagnostics : []).forEach(function (item) {
@@ -17709,17 +17709,18 @@
             var orderedThemes = orderedNames.map(function (name) { return byName[name]; });
             if (!orderedThemes.length) throw new Error('主题库存名称无法与酒馆原生 #themes 对齐');
             themeRuntime.replaceInventory(orderedThemes);
-            done(orderedNames, method, true, diagnostics);
+            done(orderedNames, method, true, diagnostics, true);
         }
 
         fetchCustomThemeInventory().then(function (themes) {
             finishWithInventory(themes, '/api/plugins/theme-manager-custom/themes + #themes');
         }).catch(function (customError) {
-            // 与背景列表一致：没有二改后端时直接读取酒馆原生主题接口。
+            // 先使用酒馆已经加载好的 #themes 名称立即渲染，完整主题对象后台补齐。
+            if (nativeNames.length) done(nativeNames, '#themes immediate', false, [], false);
             fetchNativeThemeInventory().then(function (themes) {
                 finishWithInventory(themes, '/api/settings/get + #themes');
             }).catch(function (nativeError) {
-                fallbackToExactControl(nativeError || customError);
+                if (!nativeNames.length) fallbackToExactControl(nativeError || customError);
             });
         });
     }
