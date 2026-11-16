@@ -17596,6 +17596,22 @@
     function esc(s) { return s !== null && s !== undefined ? String(s).replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;').replace(/"/g,'&quot;') : ''; }
 
     // ── ST 主题列表获取（权威库存优先，精确控件兜底）────────────
+    function fetchCustomThemeInventory() {
+        return global.fetch('/api/plugins/theme-manager-custom/themes', {
+            method: 'GET', credentials: 'same-origin', cache: 'no-cache',
+        }).then(function (response) {
+            if (!response.ok) throw new Error('custom themes ' + response.status);
+            return response.json();
+        }).then(function (payload) {
+            if (!payload || !Array.isArray(payload.themes)) throw new Error('custom themes response invalid');
+            var themes = payload.themes.filter(function (theme) {
+                return theme && typeof theme === 'object' && typeof theme.name === 'string' && theme.name.trim();
+            });
+            if (!themes.length) throw new Error('custom themes response empty');
+            return themes;
+        });
+    }
+
     function fetchThemeList(cb, retryCount) {
         retryCount = Number(retryCount) || 0;
         var found = false;
@@ -17660,23 +17676,42 @@
             if (cb) cb(stThemeList.slice());
         }
 
-        if (!themeApi || typeof themeApi.getSettingsInventory !== 'function') {
-            fallbackToExactControl(new Error('theme api unavailable'));
-            return;
-        }
         var diagnostics = [];
-        themeApi.getSettingsInventory({
-            allowDuplicateNames: true,
-            onDiagnostics: function (items) { diagnostics = items.slice(); },
-        }).then(function (themes) {
-            if ((!Array.isArray(themes) || themes.length === 0) && retryCount < 8) {
-                retryCount += 1;
-                setTimeout(function () { fetchThemeList(cb, retryCount); }, 350);
+        var nativeNames = [];
+        try { nativeNames = readExactThemeControl(); } catch (_) {}
+
+        function finishWithInventory(themes, method) {
+            var byName = Object.create(null);
+            themes.forEach(function (theme) {
+                if (theme && typeof theme.name === 'string' && theme.name.trim()) byName[theme.name.trim()] = theme;
+            });
+            var orderedNames = nativeNames.length
+                ? nativeNames.filter(function (name) { return !!byName[name]; })
+                : themes.map(function (theme) { return theme.name.trim(); });
+            var orderedThemes = orderedNames.map(function (name) { return byName[name]; });
+            if (!orderedThemes.length) throw new Error('主题库存名称无法与酒馆原生 #themes 对齐');
+            themeRuntime.replaceInventory(orderedThemes);
+            done(orderedNames, method, true, diagnostics);
+        }
+
+        fetchCustomThemeInventory().then(function (themes) {
+            finishWithInventory(themes, '/api/plugins/theme-manager-custom/themes + #themes');
+        }).catch(function (customError) {
+            if (!themeApi || typeof themeApi.getSettingsInventory !== 'function') {
+                fallbackToExactControl(customError);
                 return;
             }
-            themeRuntime.replaceInventory(themes);
-            done(themes.map(function (theme) { return theme.name; }), '/api/settings/get', true, diagnostics);
-        }).catch(fallbackToExactControl);
+            themeApi.getSettingsInventory({
+                allowDuplicateNames: true,
+                onDiagnostics: function (items) { diagnostics = items.slice(); },
+            }).then(function (themes) {
+                if (!Array.isArray(themes) || !themes.length) {
+                    fallbackToExactControl(new Error('主题库存接口返回空列表'));
+                    return;
+                }
+                finishWithInventory(themes, '/api/settings/get + #themes');
+            }).catch(fallbackToExactControl);
+        });
     }
 
     function getCurrentThemeName() {
@@ -21238,20 +21273,15 @@
             var button = ov.querySelector('#tm-refresh');
             if (button.disabled) return;
             button.disabled = true;
-            button.title = '后台刷新中，当前分类可以继续浏览';
+            button.title = '正在刷新';
             button.classList.add('tm-refresh-busy');
             button.setAttribute('aria-busy', 'true');
-            var loading = document.createElement('div');
-            loading.className = 'tm-refresh-progress'; loading.setAttribute('role', 'status');
-            loading.innerHTML = '<i class="fa-solid fa-spinner"></i><span>正在刷新美化…</span>';
-            ov.querySelector('#tm-grid-area').prepend(loading);
-            button.querySelector('i').classList.add('fa-spin');
+            button.innerHTML = '<i class="fa-solid fa-spinner fa-spin"></i><span>正在刷新</span>';
             fetchThemeList(function () {
                 button.disabled = false;
                 button.title = '刷新';
                 button.classList.remove('tm-refresh-busy'); button.removeAttribute('aria-busy');
-                loading.remove();
-                button.querySelector('i').classList.remove('fa-spin');
+                button.innerHTML = '<i class="fa-solid fa-rotate"></i>';
                 if (!ov.isConnected) return;
                 renderCatbar(); renderGrid(); renderBottomStatus();
             });
@@ -24524,7 +24554,7 @@
         if (Array.isArray(value)) return value.forEach(function (item) { migrationImageNames(item, result); });
         Object.keys(value).forEach(function (key) {
             var item = value[key];
-            if (typeof item === 'string') { var match = item.match(/\/api\/plugins\/theme-manager\/images\/([a-f0-9]{40}\.[a-z0-9]+)$/i); if (match) result.add(match[1]); }
+            if (typeof item === 'string') { var match = item.match(/\/api\/plugins\/theme-manager(?:-custom)?\/images\/([a-f0-9]{40}\.[a-z0-9]+)$/i); if (match) result.add(match[1]); }
             else migrationImageNames(item, result);
         });
     }
@@ -24536,7 +24566,7 @@
         var statePayload = stateResponse.ok ? await stateResponse.json() : { manifest: null };
         var data = dataPayload.data || {}, avatarManifest = statePayload.manifest || null, names = new Set();
         migrationImageNames(data, names); migrationImageNames(avatarManifest, names);
-        var entries = { 'manifest.json': JSON.stringify({ type: 'theme-manager-migration', version: 1, exportedAt: new Date().toISOString(), imageCount: names.size }), 'theme-manager.json': JSON.stringify(data), 'avatar-manifest.json': JSON.stringify(avatarManifest) }, imageNames = Array.from(names), done = 0;
+        var entries = { 'manifest.json': JSON.stringify({ type: 'theme-manager-migration', version: 1, exportedAt: new Date().toISOString(), imageCount: names.size }), 'theme-manager.json': JSON.stringify(data), 'avatar-manifest.json': JSON.stringify(avatarManifest), 'images/': new Uint8Array(0) }, imageNames = Array.from(names), done = 0;
         for (var i = 0; i < imageNames.length; i++) {
             var imageResponse = await fetch('/api/plugins/theme-manager-custom/images/' + encodeURIComponent(imageNames[i]), { cache: 'no-store' });
             if (!imageResponse.ok) continue;
