@@ -2,15 +2,50 @@
 (function (global) {
     if (global.ThemeMgrDiagnostics) return;
     var entries = [], started = new Date().toISOString();
+    function getSillyTavernVersion() {
+        try {
+            var el = global.document && (global.document.getElementById('version_display') || global.document.getElementById('version_display_welcome'));
+            var text = el && (el.textContent || el.innerText || '').trim();
+            if (text) return text.replace(/^v\s*/i, '');
+        } catch (_) {}
+        try {
+            var context = global.SillyTavern && typeof global.SillyTavern.getContext === 'function' ? global.SillyTavern.getContext() : null;
+            var version = context && (context.version || context.appVersion || context.displayVersion);
+            if (version) return String(version).replace(/^v\s*/i, '');
+        } catch (_) {}
+        return 'unknown';
+    }
+    function now() { return new Date().toISOString(); }
     function record(kind, details) {
-        entries.push({ time: new Date().toISOString(), kind: kind, details: details });
-        if (entries.length > 300) entries.shift();
+        var time = now();
+        var failed = kind === 'request-failed' || kind === 'script-error' || (details && details.success === false);
+        entries.push({ time: time, kind: kind, success: !failed, message: '[' + time + '] ' + (details && details.action ? details.action : kind) + '：' + (failed ? '失败' : '成功'), details: details });
+        if (entries.length > 1000) {
+            var firstSuccess = entries.findIndex(function (item) { return item.success !== false; });
+            if (firstSuccess >= 0) entries.splice(firstSuccess, 1);
+            else entries.shift();
+        }
+    }
+    function recordOperation(action, success, details) {
+        details = Object.assign({}, details || {}, { action: action, success: success !== false });
+        record('operation', details);
+    }
+    function clearSuccessful(limit) {
+        var remaining = Math.max(0, Number(limit) || 0);
+        if (!remaining) return 0;
+        var before = entries.length;
+        entries = entries.filter(function (item) {
+            if (remaining <= 0 || item.success === false) return true;
+            remaining -= 1;
+            return false;
+        });
+        return before - entries.length;
     }
     var rawFetch = global.fetch;
     if (typeof rawFetch === 'function') global.fetch = function (input, options) {
         var pathname;
         try { pathname = new URL(typeof input === 'string' ? input : input.url, global.location.href).pathname; } catch (_) {}
-        var tracked = pathname && (/^\/api\/plugins\/theme-manager\/(?:themes|backgrounds|status|data|avatars\/state|avatars\/manifest|images|images\/batch-fetch|gc)$/.test(pathname) || ['/api/settings/get', '/api/backgrounds/all'].indexOf(pathname) !== -1);
+        var tracked = pathname && (/^\/api\/plugins\/theme-manager(?:-custom)?\/(?:themes|backgrounds|status|data|avatars\/state|avatars\/manifest|images|images\/batch-fetch|gc)$/.test(pathname) || ['/api/settings/get', '/api/backgrounds/all', '/api/themes/save', '/api/themes/delete', '/csrf-token'].indexOf(pathname) !== -1);
         if (!tracked) return rawFetch.apply(this, arguments);
         var begin = performance.now();
         return rawFetch.apply(this, arguments).then(function (response) {
@@ -27,8 +62,14 @@
     });
     global.ThemeMgrDiagnostics = {
         record: record,
+        recordOperation: recordOperation,
+        clearSuccessful: clearSuccessful,
+        getEntries: function () { return entries.slice(); },
+        getSuccessCount: function () { return entries.filter(function (item) { return item.success !== false; }).length; },
         export: function (summary) {
-            var report = { format: 1, build: '4.7.1-local-backgrounds-scroll10', started: started, exported: new Date().toISOString(), viewport: { width: global.innerWidth, height: global.innerHeight, pixelRatio: global.devicePixelRatio }, summary: summary, entries: entries.slice() };
+            var version = getSillyTavernVersion();
+            summary = Object.assign({ sillyTavernVersion: version }, summary || {});
+            var report = { sillyTavernVersion: version, format: 1, build: '4.7.1-local-backgrounds-scroll10', started: started, exported: new Date().toISOString(), viewport: { width: global.innerWidth, height: global.innerHeight, pixelRatio: global.devicePixelRatio }, summary: summary, entries: entries.slice() };
             var url = URL.createObjectURL(new Blob([JSON.stringify(report, null, 2)], { type: 'application/json' }));
             var link = global.document.createElement('a'); link.href = url;
             link.download = 'theme-manager-diagnostics-' + Date.now() + '.json';
@@ -19102,7 +19143,7 @@
             .then(function (result) {
                 scheduleManagerAppearanceSync();
                 if (avatarRuntime) avatarRuntime.scheduleReconcile(80);
-                if (!result.visualVerification || !result.visualVerification.ok) {
+                if (result.visualVerification && !result.visualVerification.ok) {
                     console.warn('[ThemeManager] bound background skipped', {
                         requestedTheme: themeName,
                         currentTheme: getCurrentThemeName(),
@@ -22371,6 +22412,7 @@
             var themeName = getItemDisplayTheme(d, item);
             applyManualTheme(themeName, function (ok, reason, error) {
                 if (ok) {
+                    if (global.ThemeMgrDiagnostics) global.ThemeMgrDiagnostics.recordOperation('切换美化「' + item.name + '」', true);
                     var dd = load();
                     var refreshedItem = getLogicalItem(item.key, dd);
                     var meta = refreshedItem ? getItemMetaForWrite(dd, refreshedItem) : null;
@@ -22383,6 +22425,7 @@
                     renderBottomStatus();
                     updateBtn();
                 } else if (reason !== 'superseded') {
+                    if (global.ThemeMgrDiagnostics) global.ThemeMgrDiagnostics.recordOperation('切换美化「' + item.name + '」', false, { reason: reason, error: error && error.message ? error.message : '' });
                     if (reason === 'incomplete') toast('主题尚未完整加载，不能安全切换', true);
                     else if (reason === 'load-failed') toast('主题加载失败：' + (error && error.message ? error.message : '已保留当前主题'), true);
                     else if (reason === 'state-verify-failed') toast('主题状态未能确认切换成功，未切换绑定背景', true);
@@ -24780,7 +24823,7 @@
             '<div class="tm-field"><label>系列排列顺序</label><select id="tm-series-order-mode"><option value="current"' + (d.seriesOrderMode === 'current' ? ' selected' : '') + '>保持现状</option><option value="series-first"' + (d.seriesOrderMode === 'series-first' ? ' selected' : '') + '>系列在上，单个美化在下</option><option value="single-first"' + (d.seriesOrderMode === 'single-first' ? ' selected' : '') + '>单个美化在上，系列在下</option></select><div class="tm-hint">只调整当前分类页面的显示顺序，不改变系列成员和分类数据。</div></div>' +
             '<div class="tm-row-inline"><label>显示使用次数</label><input type="checkbox" class="tm-chk" id="tm-show-freq" ' + (d.showFreq !== false ? 'checked' : '') + ' /></div>';
         var otherSettingsHtml =
-            '<div class="tm-field"><button type="button" class="tm-btn tm-btn-outline" id="tm-export-diagnostics"><i class="fa-solid fa-file-export"></i> 导出诊断日志</button><div class="tm-hint">导出本次页面会话的请求耗时、状态及错误位置，不包含聊天、图片、密钥或主题内容。</div></div>' +
+            '<div class="tm-field"><button type="button" class="tm-btn tm-btn-outline" id="tm-export-diagnostics"><i class="fa-solid fa-file-export"></i> 导出诊断日志</button><button type="button" class="tm-btn tm-btn-outline" id="tm-clear-success-logs" style="margin-top:8px"><i class="fa-solid fa-broom"></i> 清理成功日志</button><div class="tm-hint">日志格式为 [时间] 操作：结果。成功日志可按数量清理，失败和报错日志永久保留。</div></div>' +
             '<div class="tm-row-inline"><label class="tm-setting-copy"><span>启用头像管理</span><small>开启后可从左上角切换到头像管理，使用头像库、绑定与原头像调整；关闭后同时停用聊天头像替换</small></label><input type="checkbox" class="tm-chk" id="tm-avatar-manager-enabled" ' + (d.avatarManagerEnabled !== false ? 'checked' : '') + ' /></div>' +
             '<div class="tm-row-inline"><label class="tm-setting-copy"><span>启用背景管理</span><small>开启后提供背景管理页面、分类、收藏和上传；停用时保留已有绑定与标注，不删除任何数据</small></label><input type="checkbox" class="tm-chk" id="tm-background-manager-enabled" ' + (d.backgroundManagerEnabled !== false ? 'checked' : '') + ' /></div>' +
             '<div class="tm-field"><label>绑定通用背景</label><button type="button" class="tm-bg-bind-card" id="tm-common-background">' +
@@ -24851,6 +24894,13 @@
         sheet.classList.add('tm-sheet-tall', 'tm-settings-sheet');
         sheet.querySelector('#tm-imp-migration').onclick = chooseThemeManagerMigrationZip;
         sheet.querySelector('#tm-exp-migration').onclick = function () { exportThemeManagerMigrationZip().catch(function (error) { console.error('[美化管理] 迁移包导出失败:', error); toast('迁移包导出失败：' + error.message, true); }); };
+        sheet.querySelector('#tm-clear-success-logs').onclick = function () {
+            var count = global.ThemeMgrDiagnostics.getSuccessCount();
+            if (!count) { toast('没有可清理的成功日志'); return; }
+            var value = global.prompt('要清理多少条成功日志？当前共有 ' + count + ' 条', String(count));
+            var removed = global.ThemeMgrDiagnostics.clearSuccessful(value);
+            toast('已清理 ' + removed + ' 条成功日志');
+        };
         sheet.querySelector('#tm-export-diagnostics').onclick = function () {
             var summary = { themeCount: stThemeList.length, backgroundCount: backgroundPageState.names.length, page: lastAppPage, serverStorage: getServerMode(), backgroundBatchSize: 10 };
             Promise.resolve(storageApi.collectDiagnostics()).then(function (diagnostic) {
