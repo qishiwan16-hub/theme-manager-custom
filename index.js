@@ -366,7 +366,7 @@
             (function () {
                 var requester = typeof options.requester === 'function' ? options.requester : global.fetch;
                 function readLightweightInventory() {
-                    return requester('/api/plugins/theme-manager/themes', {
+                    return requester('/api/plugins/theme-manager-custom/themes', {
                         method: 'GET', credentials: 'same-origin', cache: 'no-cache',
                     });
                 }
@@ -8587,7 +8587,7 @@
 /* BEGIN MODULE 17/29: src/avatar-sync.js | sha256:8fa5897e3cdc1431d55280625978639615d091dbfdacc72f89665861fd898f01 */
 (function (global) {
     var ns = global.ThemeMgrModules = global.ThemeMgrModules || {};
-    var SERVER_BASE = '/api/plugins/theme-manager';
+    var SERVER_BASE = '/api/plugins/theme-manager-custom';
     var CACHE_DB_NAME = 'theme_manager_custom_avatar_cache_db';
     var CONTROL_DB_NAME = 'theme_manager_custom_avatar_sync_db';
     var CONTROL_DB_VERSION = 1;
@@ -15848,7 +15848,7 @@
         function getBackgroundList(cb, force) {
             if (backgroundListCache && !force) { cb(backgroundListCache); return; }
             if (!backgroundListRequest) {
-                backgroundListRequest = global.fetch('/api/plugins/theme-manager/backgrounds', {
+                backgroundListRequest = global.fetch('/api/plugins/theme-manager-custom/backgrounds', {
                     credentials: 'same-origin', cache: 'no-cache',
                 }).then(function (response) {
                     if (response.ok) return response;
@@ -16639,7 +16639,7 @@
     var DB_VERSION = 1;
     var STORE_NAME = 'data';
     var DATA_KEY = 'main';
-    var SERVER_BASE = '/api/plugins/theme-manager';
+    var SERVER_BASE = '/api/plugins/theme-manager-custom';
     var SERVER_IMAGE_PREFIX = SERVER_BASE + '/images/';
     var MAX_IMG_WIDTH = 1200;
     var IMG_QUALITY = 0.8;
@@ -24530,15 +24530,15 @@
     }
     async function exportThemeManagerMigrationZip() {
         toast('正在收集迁移数据…');
-        var dataResponse = await fetch('/api/plugins/theme-manager/data', { cache: 'no-store' });
+        var dataResponse = await fetch('/api/plugins/theme-manager-custom/data', { cache: 'no-store' });
         if (!dataResponse.ok) throw new Error('读取后端数据失败：HTTP ' + dataResponse.status);
-        var dataPayload = await dataResponse.json(), stateResponse = await fetch('/api/plugins/theme-manager/avatars/state', { cache: 'no-store' });
+        var dataPayload = await dataResponse.json(), stateResponse = await fetch('/api/plugins/theme-manager-custom/avatars/state', { cache: 'no-store' });
         var statePayload = stateResponse.ok ? await stateResponse.json() : { manifest: null };
         var data = dataPayload.data || {}, avatarManifest = statePayload.manifest || null, names = new Set();
         migrationImageNames(data, names); migrationImageNames(avatarManifest, names);
         var entries = { 'manifest.json': JSON.stringify({ type: 'theme-manager-migration', version: 1, exportedAt: new Date().toISOString(), imageCount: names.size }), 'theme-manager.json': JSON.stringify(data), 'avatar-manifest.json': JSON.stringify(avatarManifest) }, imageNames = Array.from(names), done = 0;
         for (var i = 0; i < imageNames.length; i++) {
-            var imageResponse = await fetch('/api/plugins/theme-manager/images/' + encodeURIComponent(imageNames[i]), { cache: 'no-store' });
+            var imageResponse = await fetch('/api/plugins/theme-manager-custom/images/' + encodeURIComponent(imageNames[i]), { cache: 'no-store' });
             if (!imageResponse.ok) continue;
             entries['images/' + imageNames[i]] = new Uint8Array(await imageResponse.arrayBuffer()); done++;
         }
@@ -24587,9 +24587,9 @@
         if (!importedData || typeof importedData !== 'object') throw new Error('迁移包缺少主题管理数据');
         var imageMap = {}, imageNames = Object.keys(files).filter(function (name) { return name.indexOf('images/') === 0 && name !== 'images/'; });
         for (var i = 0; i < imageNames.length; i++) {
-            var imageName = imageNames[i], response = await fetch('/api/plugins/theme-manager/images', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ dataUrl: bytesDataUrl(files[imageName], imageName) }) });
+            var imageName = imageNames[i], response = await fetch('/api/plugins/theme-manager-custom/images', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ dataUrl: bytesDataUrl(files[imageName], imageName) }) });
             if (!response.ok) throw new Error('图片导入失败：' + imageName);
-            var result = await response.json(), oldUrl = '/api/plugins/theme-manager/images/' + imageName.slice(7);
+            var result = await response.json(), oldUrl = '/api/plugins/theme-manager-custom/images/' + imageName.slice(7);
             imageMap[oldUrl] = result.url || result.image && result.image.url;
         }
         rewriteMigratedImageUrls(importedData, imageMap);
@@ -24604,9 +24604,9 @@
             var avatarManifest = jsonBytes(avatarBytes);
             rewriteMigratedImageUrls(avatarManifest, imageMap);
             try {
-                var avatarState = await fetch('/api/plugins/theme-manager/avatars/state', { cache: 'no-store' }).then(function (r) { return r.json(); });
+                var avatarState = await fetch('/api/plugins/theme-manager-custom/avatars/state', { cache: 'no-store' }).then(function (r) { return r.json(); });
                 if (avatarManifest && avatarState && avatarState.datasetId) {
-                    await fetch('/api/plugins/theme-manager/avatars/manifest', { method: 'PUT', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ datasetId: avatarState.datasetId, expectedRevision: avatarState.revision || 0, manifest: avatarManifest }) });
+                    await fetch('/api/plugins/theme-manager-custom/avatars/manifest', { method: 'PUT', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ datasetId: avatarState.datasetId, expectedRevision: avatarState.revision || 0, manifest: avatarManifest }) });
                 }
             } catch (avatarError) { console.warn('[美化管理] 头像清单导入跳过:', avatarError); }
         }
