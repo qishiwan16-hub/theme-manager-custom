@@ -15848,9 +15848,8 @@
         function readNativeBackgroundNames() {
             var names = [];
             try {
-                var root = document.getElementById('bg_menu_content');
-                if (!root) return names;
-                root.querySelectorAll('.bg_example').forEach(function (item) {
+                document.querySelectorAll('.bg_example[bgfile]').forEach(function (item) {
+                    if (item.closest('#background_template')) return;
                     var name = item.getAttribute('bgfile') || (item.dataset && (item.dataset.bg || item.dataset.filename));
                     if (name && names.indexOf(name) === -1) names.push(name);
                 });
@@ -15863,6 +15862,16 @@
             if (nativeNames.length && (!backgroundListCache || force)) {
                 backgroundListCache = nativeNames;
                 cb(nativeNames);
+            }
+            if (!nativeNames.length) {
+                [80, 240, 700].forEach(function (delay) {
+                    setTimeout(function () {
+                        var delayedNames = readNativeBackgroundNames();
+                        if (!delayedNames.length || (backgroundListCache && backgroundListCache.length)) return;
+                        backgroundListCache = delayedNames;
+                        cb(delayedNames);
+                    }, delay);
+                });
             }
             if (!backgroundListRequest) {
                 backgroundListRequest = global.fetch('/api/plugins/theme-manager-custom/backgrounds', {
