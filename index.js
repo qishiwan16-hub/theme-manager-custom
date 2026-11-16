@@ -474,7 +474,7 @@
         var getPostHeaders = typeof options.getPostHeaders === 'function'
             ? options.getPostHeaders
             : function () { return { 'Content-Type': 'application/json' }; };
-        var extensionName = clean(options.extensionName) || 'theme-mgr';
+        var extensionName = clean(options.extensionName) || 'theme-manager-custom';
         var trustedRemotes = (options.trustedRemotes || []).map(normalizeRemoteUrl).filter(Boolean);
         var onStateChange = typeof options.onStateChange === 'function' ? options.onStateChange : function () {};
         var state = {
@@ -16892,7 +16892,7 @@
             themeApi = modules.createThemeApi({ schema: themeSchema });
             extensionUpdater = modules.createExtensionUpdater({
                 extensionName: 'theme-mgr',
-                trustedRemotes: ['https://github.com/qishiwan16-hub/theme-mgr'],
+                trustedRemotes: ['https://github.com/qishiwan16-hub/theme-manager-custom'],
                 getPostHeaders: getPostHeaders,
                 onStateChange: function () {
                     syncExtensionUpdateIndicator();
@@ -24337,7 +24337,7 @@
             .then(function (status) {
                 var capability = status.capabilities && status.capabilities.imageGarbageCollection;
                 if (!capability || capability.version !== 1 || capability.avatarAware !== true || capability.dryRun !== true || capability.exactCommit !== true) {
-                    throw avatarImageGcError('当前后端版本不支持安全清理孤儿图片，请先更新 theme-mgr-server', 'AVATAR_IMAGE_GC_UNSUPPORTED');
+                    throw avatarImageGcError('当前后端版本不支持安全清理孤儿图片，请先更新 theme-manager-custom-server', 'AVATAR_IMAGE_GC_UNSUPPORTED');
                 }
                 return getPostHeaders().then(function (headers) {
                     var payload = { dryRun: dryRun === true };
@@ -24390,7 +24390,7 @@
                     (authority.localOnly === true ? '<div class="tm-hint" style="margin-bottom:9px">恢复会完整替换 Avatar Manager 数据，不会合并；旧头像库将保留为事务回滚依据。</div>' : '<div class="tm-hint" style="margin-bottom:9px">本阶段仅支持经明确确认的本地存储环境恢复；后端头像库不会被修改。</div>')) +
             '<div class="tm-data-danger"><div class="tm-data-group-label">后端空间清理</div>' +
             '<button class="tm-btn tm-btn-danger" id="tm-avatar-clean-orphan-images"' + (storageState.phase !== 'remote-ready' || storageState.authoritative !== 'remote' || storageState.writable !== true || recoveryPending ? ' disabled' : '') + '><i class="fa-solid fa-broom"></i><span><strong>清理孤儿图片</strong><small>先扫描，只删除未被美化或头像库引用且已保留 24 小时的后端图片</small></span></button>' +
-            '<div class="tm-hint" style="margin-top:7px">仅新版 theme-mgr-server 支持；本地头像库无需执行此清理。</div></div>';
+            '<div class="tm-hint" style="margin-top:7px">仅新版 theme-manager-custom-server 支持；本地头像库无需执行此清理。</div></div>';
         var extensionHtml = '<div class="tm-update-panel' + (updateState.phase === 'ready' && updateState.available ? ' has-update' : '') + '"><div class="tm-update-panel-head"><div><strong>美化管理 v' + esc(TM_VERSION) + '</strong><span class="tm-update-status">' + esc(updateView.status) + '</span></div><button type="button" class="tm-btn tm-btn-outline tm-update-action" id="tm-avatar-update-action" data-update-mode="' + esc(updateView.mode) + '"' + (updateView.disabled ? ' disabled' : '') + '><i class="fa-solid ' + (updateView.mode === 'update' ? 'fa-download' : 'fa-rotate') + '"></i> ' + esc(updateView.action) + '</button></div><div class="tm-update-detail"' + (updateView.detail ? '' : ' hidden') + '>' + esc(updateView.detail) + '</div><div class="tm-plugin-credit"><span>作者：温水</span><span>二改作者：Meoroll / 绒兔声</span><span>发布于旅程</span></div></div>';
         var sheet = createSheet(['<div class="tm-sheet-title"><i class="fa-solid fa-sliders"></i>设置</div>', organizeHtml, buildDisclosureHtml('tm-avatar-settings-interface', '界面显示', 'fa-display', interfaceHtml), buildDisclosureHtml('tm-avatar-settings-data', '数据管理', 'fa-database', dataHtml), extensionHtml].join(''));
         sheet.classList.add('tm-sheet-tall', 'tm-settings-sheet');

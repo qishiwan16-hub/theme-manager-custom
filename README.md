@@ -49,7 +49,7 @@
 3. 确保目录结构为：
    ```
    extensions/
-    └── theme-manager/
+    └── theme-manager-custom/
         ├── index.js
         ├── manifest.json
         └── README.md
@@ -70,10 +70,10 @@ node -c dist/index.js
 
 ### 可选：安装后端存储
 
-如需把截图、缩略图、悬浮球图片和标注数据保存到后端，请额外安装 `theme-mgr-server` 后端仓库：
+如需把截图、缩略图、悬浮球图片和标注数据保存到后端，请额外安装 `theme-manager-custom-server` 后端仓库：
 
-1. 下载或克隆 `theme-mgr-server`
-2. 将后端文件夹复制到 `SillyTavern/plugins/theme-manager/`
+1. 下载或克隆 `theme-manager-custom-server`
+2. 将后端文件夹复制到 `SillyTavern/plugins/theme-manager-custom/`
 3. 重启 SillyTavern
 4. 打开美化管理器，插件会自动优先使用后端存储；后端不可用时会回退到浏览器本地存储
 
@@ -98,7 +98,7 @@ node -c dist/index.js
 ## 💡 说明
 
 - 管理器通过读取 SillyTavern 的主题列表来工作，切换美化时会调用 ST 的主题能力
-- 安装 `theme-mgr-server` 后端后，分类、标签、截图、缩略图、角色/聊天绑定、悬浮球图片等数据会优先保存到后端；未安装后端时会回退到浏览器 IndexedDB
+- 安装 `theme-manager-custom-server` 后端后，分类、标签、截图、缩略图、角色/聊天绑定、悬浮球图片等数据会优先保存到后端；未安装后端时会回退到浏览器 IndexedDB
 - 「导出标注 / 导入标注」会处理分类、标签、截图、角色/聊天绑定等附加数据，不修改 ST 主题文件
 - 「导出美化包 / 导入美化」会读写 ST 用户主题 JSON，并尽量携带截图资源和分类标注，适合备份或社区分享
 - 日夜美化在网格中显示为一张卡片，但美化包会同时导出两个真实主题及其日夜关系
@@ -159,7 +159,7 @@ node -c dist/index.js
 - 调整面板可快捷进入头像库或从相册导入，并可选择是否把导入图片保存到头像库
 - 修复导入头像后绑定聊天或美化失败、切换圆形与方形美化后头像形状未及时恢复、头像库触摸滚动被其他悬浮球插件拦截等问题
 - 新增后端孤儿图片安全清理：先扫描并确认，只删除未被美化或头像库引用且超过 24 小时保护期的图片；候选变化时自动中止
-- 本版本需同时更新 `theme-mgr-server` 至 v2.0.0 才能使用后端头像同步与孤儿图片清理
+- 本版本需同时更新 `theme-manager-custom-server` 至 v2.0.0 才能使用后端头像同步与孤儿图片清理
 
 ### v4.5.1
 
@@ -301,7 +301,7 @@ node -c dist/index.js
 
 这是一次存储和联动升级，重点解决截图/图片占用浏览器缓存、背景绑定同步和美化包分享不带截图的问题。
 
-- 新增 SillyTavern server plugin 后端：独立仓库 `theme-mgr-server` 可安装到 `SillyTavern/plugins/theme-manager/`
+- 新增 SillyTavern server plugin 后端：独立仓库 `theme-manager-custom-server` 可安装到 `SillyTavern/plugins/theme-manager-custom/`
 - 后端可用时，标注数据与截图、缩略图、悬浮球图片会保存到后端，前端仅保留轻量引用
 - 截图预览支持选择焦点和缩放：保留完整构图，并随网格卡片形状自适应展示区域
 - 导出标注和美化包时会携带后端图片 `_assets`，导入时自动还原/上传图片
