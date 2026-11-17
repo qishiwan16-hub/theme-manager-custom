@@ -45,10 +45,16 @@
     if (typeof rawFetch === 'function') global.fetch = function (input, options) {
         var pathname;
         try { pathname = new URL(typeof input === 'string' ? input : input.url, global.location.href).pathname; } catch (_) {}
-        var tracked = pathname && (/^\/api\/plugins\/theme-manager(?:-custom)?\/(?:themes|backgrounds|status|data|avatars\/state|avatars\/manifest|images|images\/batch-fetch|gc)$/.test(pathname) || ['/api/settings/get', '/api/backgrounds/all', '/api/themes/save', '/api/themes/delete', '/csrf-token'].indexOf(pathname) !== -1);
+        var tracked = pathname && (/^\/api\/plugins\/theme-manager(?:-custom)?\/(?:themes|backgrounds|status|data|avatars\/state|avatars\/manifest|images|images\/batch-fetch|gc)$/.test(pathname) || ['/api/settings/get', '/api/backgrounds/all', '/api/themes/save', '/api/themes/delete', '/api/backgrounds/delete', '/csrf-token'].indexOf(pathname) !== -1);
         if (!tracked) return rawFetch.apply(this, arguments);
         var begin = performance.now();
         return rawFetch.apply(this, arguments).then(function (response) {
+            if (pathname === '/api/backgrounds/delete' && response.ok) {
+                try {
+                    var deleted = JSON.parse(options && options.body || '{}');
+                    if (typeof deleted.bg === 'string' && deleted.bg) global.dispatchEvent(new CustomEvent('theme-manager-background-deleted', { detail: { name: deleted.bg } }));
+                } catch (_) {}
+            }
             record('request', { endpoint: pathname, method: options && options.method || 'GET', status: response.status, ms: Math.round(performance.now() - begin) });
             return response;
         }, function (error) {
@@ -2850,6 +2856,9 @@
         author: '',
         description: '',
         backgroundName: '',
+        backgroundNames: Object.freeze([]),
+        defaultBackgroundName: '',
+        scriptBinding: null,
     });
     var RESERVED_CATEGORY_NAMES = Object.freeze([
         '__all__',
@@ -2890,6 +2899,9 @@
             author: '',
             description: '',
             backgroundName: '',
+            backgroundNames: [],
+            defaultBackgroundName: '',
+            scriptBinding: null,
         };
     }
 
@@ -2909,6 +2921,7 @@
         var meta = themeMeta[name];
         if (!Array.isArray(meta.tags)) meta.tags = [];
         if (meta.backgroundName === undefined) meta.backgroundName = '';
+        ns.themeAssets.normalize(meta);
         if (meta.thumbData === undefined) meta.thumbData = null;
         if (meta.crop === undefined) meta.crop = null;
         return meta;
@@ -2923,6 +2936,8 @@
             (typeof meta.author === 'string' && meta.author.trim()) ||
             (typeof meta.description === 'string' && meta.description.trim()) ||
             (typeof meta.backgroundName === 'string' && meta.backgroundName.trim()) ||
+            (Array.isArray(meta.backgroundNames) && meta.backgroundNames.length > 0) ||
+            (meta.scriptBinding && Array.isArray(meta.scriptBinding.scripts) && meta.scriptBinding.scripts.length > 0) ||
             (typeof meta.imageData === 'string' && meta.imageData) ||
             (typeof meta.thumbData === 'string' && meta.thumbData) ||
             (isObject(meta.crop) && Object.keys(meta.crop).length > 0)
@@ -3107,6 +3122,7 @@
             ['author', 'description', 'backgroundName'].forEach(function (key) {
                 if (!target[key] && incoming[key]) target[key] = incoming[key];
             });
+            ns.themeAssets.merge(target, incoming);
             if (typeof options.mergePreview === 'function') options.mergePreview(target, incoming);
             else ['imageData', 'thumbData', 'crop'].forEach(function (key) {
                 if (!target[key] && incoming[key]) target[key] = cloneValue(incoming[key]);
@@ -15825,6 +15841,275 @@
     };
 })(window);
 
+// Theme asset bindings: ordered backgrounds and TavernHelper global scripts.
+(function (global) {
+    var ns = global.ThemeMgrModules = global.ThemeMgrModules || {};
+    function names(meta) {
+        meta = meta || {};
+        var list = Array.isArray(meta.backgroundNames) ? meta.backgroundNames : [meta.backgroundName];
+        return Array.from(new Set(list.filter(function (name) { return typeof name === 'string' && name.trim(); })));
+    }
+    function normalize(meta) {
+        var list = names(meta);
+        meta.backgroundNames = list;
+        meta.defaultBackgroundName = list.indexOf(meta.defaultBackgroundName) !== -1 ? meta.defaultBackgroundName : (list[0] || '');
+        // Keep the legacy field usable by older versions and metadata consumers.
+        meta.backgroundName = meta.defaultBackgroundName;
+        var binding = meta.scriptBinding;
+        if (!binding || typeof binding.folderId !== 'string' || !binding.folderId || !Array.isArray(binding.scripts)) meta.scriptBinding = null;
+        else {
+            var seen = new Set();
+            meta.scriptBinding = { folderId: binding.folderId, folderName: typeof binding.folderName === 'string' ? binding.folderName : '', scripts: binding.scripts.filter(function (script) {
+                if (!script || typeof script.id !== 'string' || !script.id || seen.has(script.id)) return false;
+                seen.add(script.id); return true;
+            }).map(function (script) { return { id: script.id, name: typeof script.name === 'string' ? script.name : script.id }; }) };
+        }
+        return meta;
+    }
+    function merge(target, incoming) {
+        var combined = names(target).concat(names(incoming));
+        var oldDefault = normalize(target).defaultBackgroundName;
+        target.backgroundNames = Array.from(new Set(combined));
+        target.defaultBackgroundName = oldDefault || incoming.defaultBackgroundName || incoming.backgroundName || '';
+        normalize(target);
+        if (!target.scriptBinding && incoming.scriptBinding) target.scriptBinding = JSON.parse(JSON.stringify(incoming.scriptBinding));
+        return normalize(target);
+    }
+    function log(action, ok, details) {
+        if (global.ThemeMgrDiagnostics) global.ThemeMgrDiagnostics.recordOperation(action, ok, details);
+    }
+    ns.themeAssets = { names: names, normalize: normalize, merge: merge };
+    ns.createThemeAssets = function (opts) {
+        var owned = new Map(), overrides = new Set(), active = new Set(), observed = new Map(), queue = Promise.resolve();
+        var helperRef = null, watching = null;
+        function helper() {
+            var api = global.TavernHelper;
+            if (!api || typeof api.getScriptTrees !== 'function' || typeof api.updateScriptTreesWith !== 'function') {
+                throw new Error('酒馆助手未安装或版本缺少全局脚本接口');
+            }
+            return api;
+        }
+        function index(trees) {
+            var out = new Map();
+            (trees || []).forEach(function (folder) {
+                if (folder.type !== 'folder') return;
+                out.set('folder:' + folder.id, folder);
+                (folder.scripts || []).forEach(function (script) { out.set('script:' + folder.id + ':' + script.id, script); });
+            });
+            return out;
+        }
+        var sessionKey = 'theme-manager-custom:script-ownership:v1';
+        function remember() {
+            try { global.sessionStorage.setItem(sessionKey, JSON.stringify({ owned: Array.from(owned), overrides: Array.from(overrides), active: Array.from(active), observed: Array.from(observed) })); } catch (_) {}
+        }
+        try {
+            var saved = JSON.parse(global.sessionStorage.getItem(sessionKey) || 'null');
+            if (saved) { owned = new Map(saved.owned); overrides = new Set(saved.overrides); active = new Set(saved.active); observed = new Map(saved.observed); }
+        } catch (_) {}
+        function observe(items) {
+            observed.forEach(function (last, key) {
+                var item = items.get(key);
+                if (active.has(key) && item && item.enabled !== last) {
+                    overrides.add(key); owned.delete(key); observed.set(key, item.enabled);
+                    log('绑定脚本手动状态保护', true, { key: key });
+                }
+            });
+            owned.forEach(function (state, key) {
+                var item = items.get(key);
+                var manualChild = item && state.scriptsBefore && state.scriptsBefore.some(function (before) {
+                    var scriptKey = 'script:' + item.id + ':' + before[0], script = items.get(scriptKey);
+                    return script && script.enabled === true && before[1] !== true && !owned.has(scriptKey) && !active.has(scriptKey);
+                });
+                if (!item || item.enabled !== state.last || manualChild) {
+                    owned.delete(key);
+                    if (active.has(key)) overrides.add(key);
+                    log('绑定脚本手动状态保护', true, { key: key, missing: !item });
+                }
+            });
+            remember();
+        }
+        function startWatch() {
+            if (watching || (!owned.size && !active.size)) return;
+            watching = global.setInterval(function () {
+                if (!owned.size && !active.size) { global.clearInterval(watching); watching = null; return; }
+                try {
+                    var api = helper();
+                    if (helperRef && api !== helperRef) { owned.clear(); overrides.clear(); active.clear(); observed.clear(); remember(); return; }
+                    helperRef = api;
+                    Promise.resolve(api.getScriptTrees({ type: 'global' })).then(function (trees) { observe(index(trees)); }).catch(function () {});
+                } catch (_) {}
+            }, 500);
+        }
+        function sync(themeName, isCurrent) {
+            var task = queue.catch(function () {}).then(async function () {
+                if (isCurrent && !isCurrent()) return;
+                var meta = normalize(Object.assign({}, opts.load().themeMeta[themeName] || {})), binding = meta.scriptBinding;
+                if ((!binding || !binding.scripts.length) && !owned.size && !active.size) return { ok: true };
+                var api = helper();
+                if (helperRef && helperRef !== api) { owned.clear(); overrides.clear(); active.clear(); observed.clear(); remember(); }
+                helperRef = api;
+                var desired = new Set(), missing = [], nextOwned, nextOverrides, expected = new Map();
+                await api.updateScriptTreesWith(function (trees) {
+                    if (isCurrent && !isCurrent()) return trees;
+                    var copy = JSON.parse(JSON.stringify(trees)), items = index(copy), originals = index(trees);
+                    observe(items);
+                    nextOwned = new Map(owned); nextOverrides = new Set(overrides);
+                    if (binding && binding.folderId && Array.isArray(binding.scripts) && binding.scripts.length) {
+                        var folderKey = 'folder:' + binding.folderId;
+                        if (!items.has(folderKey)) missing.push('文件夹 ' + (binding.folderName || binding.folderId));
+                        else {
+                            binding.scripts.forEach(function (script) {
+                                var key = 'script:' + binding.folderId + ':' + script.id;
+                                if (items.has(key)) desired.add(key);
+                                else missing.push('脚本 ' + (script.name || script.id));
+                            });
+                            if (desired.size) desired.add(folderKey);
+                        }
+                    }
+                    nextOverrides.forEach(function (key) { if (!desired.has(key)) nextOverrides.delete(key); });
+                    nextOwned.forEach(function (state, key) {
+                        if (desired.has(key)) return; // Shared scripts keep running.
+                        var item = items.get(key);
+                        if (item && item.enabled === state.last) item.enabled = state.before;
+                        nextOwned.delete(key);
+                    });
+                    desired.forEach(function (key) {
+                        var item = items.get(key);
+                        if (!item || nextOverrides.has(key) || item.enabled === true) return;
+                        if (!nextOwned.has(key)) nextOwned.set(key, { before: item.enabled, last: true, scriptsBefore: item.type === 'folder' ? (item.scripts || []).map(function (script) { return [script.id, script.enabled]; }) : null });
+                        item.enabled = true;
+                    });
+                    items.forEach(function (item, key) {
+                        var original = originals.get(key);
+                        if (desired.has(key) || (original && item.enabled !== original.enabled)) expected.set(key, item.enabled);
+                    });
+                    return copy;
+                }, { type: 'global' });
+                if (!nextOwned) return;
+                // The public API confirms enabled values, not iframe initialization.
+                var actual = index(await api.getScriptTrees({ type: 'global' }));
+                owned = nextOwned; overrides = nextOverrides; active = desired; observed = new Map();
+                expected.forEach(function (enabled, key) {
+                    var item = actual.get(key);
+                    if (!item || item.enabled !== enabled) missing.push('开关未生效 ' + key);
+                });
+                desired.forEach(function (key) { var item = actual.get(key); if (item) observed.set(key, item.enabled); });
+                remember(); startWatch();
+                log('同步美化绑定脚本开关', missing.length === 0, { theme: themeName, requested: binding && binding.scripts ? binding.scripts.length : 0, missing: missing, status: 'enabled-state-only' });
+                if (missing.length) opts.toast('美化已切换；绑定缺失：' + missing.join('、'), true);
+                return { ok: missing.length === 0, missing: missing };
+            }).catch(function (error) {
+                log('同步美化绑定脚本开关', false, { theme: themeName, error: error.message });
+                opts.toast('美化已切换；脚本绑定未完成：' + error.message, true);
+                return { ok: false, error: error.message };
+            });
+            queue = task;
+            return task;
+        }
+        function chooseBackground(meta) {
+            var normalized = normalize(JSON.parse(JSON.stringify(meta || {}))), list = normalized.backgroundNames;
+            if (list.length < 2) return Promise.resolve(normalized.defaultBackgroundName);
+            return new Promise(function (resolve) {
+                var done = false;
+                var sheet = opts.createSheet('<div class="tm-sheet-title">选择本次美化背景</div><p class="tm-hint">关闭或取消会使用默认背景，不改变默认设置。</p>' + list.map(function (name, i) {
+                    return '<button type="button" class="tm-bg-bind-card" data-choice="' + i + '">' + opts.backgrounds().buildBackgroundBindHtml(name, { selectedHint: name === normalized.defaultBackgroundName ? '默认背景' : '仅本次使用' }) + '</button>';
+                }).join('') + '<button type="button" class="tm-btn tm-btn-outline" data-default>使用默认背景 / 取消</button>');
+                function cleanup() { global.document.removeEventListener('keydown', keydown, true); global.removeEventListener('popstate', back); }
+                function finish(name) {
+                    if (done) return;
+                    done = true; cleanup();
+                    opts.closeSheet(sheet, { force: true });
+                    log('选择美化背景', true, { background: name, default: name === normalized.defaultBackgroundName });
+                    resolve(name);
+                }
+                function keydown(event) { if (event.key === 'Escape') { event.preventDefault(); event.stopImmediatePropagation(); finish(normalized.defaultBackgroundName); } }
+                function back() { finish(normalized.defaultBackgroundName); }
+                opts.setBeforeClose(sheet, function () { finish(normalized.defaultBackgroundName); return false; });
+                sheet.querySelectorAll('[data-choice]').forEach(function (button) { button.onclick = function () { finish(list[Number(button.dataset.choice)]); }; });
+                sheet.querySelector('[data-default]').onclick = function () { finish(normalized.defaultBackgroundName); };
+                global.document.addEventListener('keydown', keydown, true);
+                global.addEventListener('popstate', back);
+            });
+        }
+        function editBackgrounds(meta, onChange) {
+            normalize(meta);
+            var sheet = opts.createSheet('<div class="tm-sheet-title">绑定多个背景</div><p class="tm-hint">按添加顺序保存。删除默认后使用剩余第一张。完成后请在美化编辑页点击保存。</p><div data-list></div><button type="button" class="tm-btn tm-btn-outline" data-add>添加背景</button><button type="button" class="tm-btn tm-btn-safe" data-done>完成</button>');
+            function render() {
+                normalize(meta);
+                sheet.querySelector('[data-list]').innerHTML = meta.backgroundNames.map(function (name, i) {
+                    return '<div class="tm-field"><div class="tm-bg-bind-card">' + opts.backgrounds().buildBackgroundBindHtml(name, { selectedHint: name === meta.defaultBackgroundName ? '默认背景' : '按绑定顺序排列' }) + '</div><button type="button" class="tm-btn-sm" data-default="' + i + '">' + (name === meta.defaultBackgroundName ? '当前默认' : '设为默认') + '</button> <button type="button" class="tm-btn-sm" data-remove="' + i + '">解绑</button></div>';
+                }).join('') || '<p class="tm-hint">暂无绑定背景，沿用无绑定时的背景设置。</p>';
+            }
+            sheet.onclick = function (event) {
+                var button = event.target.closest('[data-default],[data-remove]');
+                if (!button) return;
+                if (button.hasAttribute('data-default')) meta.defaultBackgroundName = meta.backgroundNames[Number(button.dataset.default)];
+                else meta.backgroundNames.splice(Number(button.dataset.remove), 1);
+                render(); onChange();
+            };
+            sheet.querySelector('[data-add]').onclick = function () {
+                opts.backgrounds().openBackgroundPickerSheet('', function (name) {
+                    if (!sheet.isConnected || !name || meta.backgroundNames.indexOf(name) !== -1) return;
+                    meta.backgroundNames.push(name); render(); onChange();
+                });
+            };
+            sheet.querySelector('[data-done]').onclick = function () { opts.closeSheet(sheet); };
+            render();
+        }
+        async function editScripts(binding, onChange) {
+            try {
+                var api = null, trees = [], availabilityError = '';
+                try { api = helper(); trees = await api.getScriptTrees({ type: 'global' }); }
+                catch (error) { availabilityError = error.message; log('读取美化脚本列表', false, { error: availabilityError }); }
+                var folders = trees.filter(function (item) { return item.type === 'folder' && (item.name === '美化脚本' || (binding && item.id === binding.folderId)); });
+                var draft = binding ? JSON.parse(JSON.stringify(binding)) : null;
+                if (!draft && folders.length === 1) draft = { folderId: folders[0].id, folderName: folders[0].name, scripts: [] };
+                var sheet = opts.createSheet('<div class="tm-sheet-title">绑定酒馆助手脚本</div>' + (availabilityError ? '<p class="tm-hint">' + opts.esc(availabilityError) + '；仍可解除已有绑定。</p>' : '') + '<p class="tm-hint">在酒馆助手的全局脚本区创建“美化脚本”文件夹，并打开全局脚本总开关。选择完成后请保存美化。管理器只修改绑定文件夹及脚本的启用状态；开关更新不代表脚本初始化成功。</p><div class="tm-field"><label>脚本文件夹</label><select data-folder><option value="">请选择文件夹</option>' + folders.map(function (folder) { return '<option value="' + opts.esc(folder.id) + '">' + opts.esc(folder.name) + ' · ' + opts.esc(folder.id) + '</option>'; }).join('') + '</select></div>' + (api && !folders.some(function (folder) { return folder.name === '美化脚本'; }) ? '<button type="button" class="tm-btn tm-btn-outline" data-create-folder>创建“美化脚本”文件夹</button>' : '') + '<div data-scripts></div><button type="button" class="tm-btn tm-btn-outline" data-clear>解除全部脚本绑定</button><button type="button" class="tm-btn tm-btn-safe" data-done>完成</button>');
+                var createFolder = sheet.querySelector('[data-create-folder]');
+                if (createFolder) createFolder.onclick = async function () {
+                    createFolder.disabled = true;
+                    try {
+                        await api.updateScriptTreesWith(function (current) {
+                            if (current.some(function (folder) { return folder.type === 'folder' && folder.name === '美化脚本'; })) return current;
+                            return current.concat([{ type: 'folder', name: '美化脚本', enabled: false, scripts: [] }]);
+                        }, { type: 'global' });
+                        log('创建美化脚本文件夹', true, {});
+                        opts.closeSheet(sheet, { force: true });
+                        await editScripts(draft, onChange);
+                    } catch (error) { createFolder.disabled = false; log('创建美化脚本文件夹', false, { error: error.message }); opts.toast('创建文件夹失败：' + error.message, true); }
+                };
+                var select = sheet.querySelector('[data-folder]');
+                select.value = draft ? draft.folderId : '';
+                function render() {
+                    var folder = folders.find(function (item) { return draft && item.id === draft.folderId; });
+                    var scripts = folder ? folder.scripts || [] : [];
+                    var saved = draft && Array.isArray(draft.scripts) ? draft.scripts : [];
+                    var all = scripts.concat(saved.filter(function (item) { return !scripts.some(function (s) { return s.id === item.id; }); }).map(function (item) { return { id: item.id, name: item.name, missing: true }; }));
+                    sheet.querySelector('[data-scripts]').innerHTML = (!folder ? '<p class="tm-hint">' + (draft ? '绑定文件夹已缺失；可重新选择或解除绑定。' : '未找到文件夹时，请先到酒馆助手全局脚本区创建。多个同名文件夹请按 ID 选择。') + '</p>' : '') + all.map(function (script, i) {
+                        return '<label class="tm-bg-bind-row"><span>' + opts.esc(script.name || script.id) + (script.missing ? '（已缺失）' : '') + '</span><input type="checkbox" data-script="' + i + '"' + (saved.some(function (s) { return s.id === script.id; }) ? ' checked' : '') + '></label>';
+                    }).join('');
+                    sheet.querySelectorAll('[data-script]').forEach(function (input) { input.onchange = function () {
+                        var script = all[Number(input.dataset.script)];
+                        draft.scripts = draft.scripts.filter(function (item) { return item.id !== script.id; });
+                        if (input.checked) draft.scripts.push({ id: script.id, name: script.name || script.id });
+                        onChange(JSON.parse(JSON.stringify(draft)));
+                    }; });
+                }
+                select.onchange = function () {
+                    var folder = folders.find(function (item) { return item.id === select.value; });
+                    draft = folder ? { folderId: folder.id, folderName: folder.name, scripts: [] } : null;
+                    onChange(draft); render();
+                };
+                sheet.querySelector('[data-clear]').onclick = function () { draft = null; select.value = ''; onChange(null); render(); };
+                sheet.querySelector('[data-done]').onclick = function () { opts.closeSheet(sheet); };
+                render();
+            } catch (error) { log('读取美化脚本列表', false, { error: error.message }); opts.toast(error.message, true); }
+        }
+        if (owned.size || active.size) { helperRef = global.TavernHelper || null; startWatch(); }
+        return { sync: sync, chooseBackground: chooseBackground, editBackgrounds: editBackgrounds, editScripts: editScripts };
+    };
+})(window);
+
 /* BEGIN MODULE 26/29: src/backgrounds.js | sha256:219b4704fb4d9bfd844a42fe5d5f89c3ccdcd1bfa70ffa43b631f65acdfe60c2 */
 (function (global) {
     var ns = global.ThemeMgrModules = global.ThemeMgrModules || {};
@@ -15849,6 +16134,25 @@
         var backgroundListCache = null;
         var backgroundThumbnailCache = new Map();
         var BACKGROUND_THUMBNAIL_CACHE_LIMIT = 64;
+        global.addEventListener('theme-manager-background-deleted', function (event) {
+            var name = event.detail && event.detail.name;
+            if (!name) return;
+            var data;
+            try { data = load(); } catch (_) { return; }
+            var changed = false;
+            Object.keys(data.themeMeta || {}).forEach(function (theme) {
+                var meta = data.themeMeta[theme];
+                if (ns.themeAssets.names(meta).indexOf(name) === -1) return;
+                ns.themeAssets.normalize(meta);
+                meta.backgroundNames = meta.backgroundNames.filter(function (item) { return item !== name; });
+                ns.themeAssets.normalize(meta); changed = true;
+            });
+            if (data.commonBackgroundName === name) { data.commonBackgroundName = ''; changed = true; }
+            backgroundListCache = null; backgroundThumbnailCache.delete(name);
+            if (changed) Promise.resolve(save(data)).then(function () {
+                if (global.ThemeMgrDiagnostics) global.ThemeMgrDiagnostics.recordOperation('删除背景后更新美化绑定', true, { background: name });
+            }).catch(function (error) { toast('背景已删除，绑定更新保存失败：' + error.message, true); });
+        });
 
         function getBackgroundPath(backgroundName) {
             if (typeof global.__TAURITAVERN_BACKGROUND_PATH__ === 'function') {
@@ -15972,8 +16276,12 @@
                 changed = true;
             }
             Object.keys(data.themeMeta || {}).forEach(function (themeName) {
-                if (data.themeMeta[themeName] && data.themeMeta[themeName].backgroundName === oldName) {
-                    data.themeMeta[themeName].backgroundName = newName;
+                var meta = data.themeMeta[themeName];
+                if (meta && ns.themeAssets.names(meta).indexOf(oldName) !== -1) {
+                    ns.themeAssets.normalize(meta);
+                    meta.backgroundNames = meta.backgroundNames.map(function (name) { return name === oldName ? newName : name; });
+                    if (meta.defaultBackgroundName === oldName) meta.defaultBackgroundName = newName;
+                    ns.themeAssets.normalize(meta);
                     changed = true;
                 }
             });
@@ -16162,12 +16470,12 @@
             }, true);
         }
 
-        function applyBoundBackground(themeName, cb, isCurrent) {
+        function applyBoundBackground(themeName, cb, isCurrent, selectedBackground) {
             var data = load();
             var meta = data.themeMeta[themeName];
-            var backgroundName = meta && meta.backgroundName
-                ? meta.backgroundName
-                : (typeof data.commonBackgroundName === 'string' ? data.commonBackgroundName : '');
+            var normalized = ns.themeAssets.normalize(Object.assign({}, meta || {}));
+            var backgroundName = selectedBackground && normalized.backgroundNames.indexOf(selectedBackground) !== -1
+                ? selectedBackground : normalized.defaultBackgroundName || (typeof data.commonBackgroundName === 'string' ? data.commonBackgroundName : '');
             if (!backgroundName) { if (cb) cb(true); return; }
 
             var url = getBackgroundCssUrl(backgroundName);
@@ -16195,14 +16503,14 @@
                 });
         }
 
-        function finishApplyTheme(themeName, cb, ok, requestId) {
+        function finishApplyTheme(themeName, cb, ok, requestId, selectedBackground) {
             var isCurrent = function () { return themeRuntime.isApplyCurrent(requestId); };
             if (!isCurrent()) { if (cb) cb(false, 'superseded'); return; }
             if (!ok) { if (cb) cb(false); return; }
             applyBoundBackground(themeName, function (backgroundOk, reason) {
                 if (!isCurrent()) { if (cb) cb(false, 'superseded'); return; }
                 if (cb) cb(backgroundOk !== false, reason);
-            }, isCurrent);
+            }, isCurrent, selectedBackground);
         }
 
         return {
@@ -16753,6 +17061,8 @@
     var bindingController = null;
     var appearanceApi = null;
     var backgroundsApi = null;
+    var themeAssetsApi = null;
+    var manualBackgroundIntent = 0;
     var uiSheetsApi = null;
     var uiEventsApi = null;
     var supportReady = false;
@@ -17043,6 +17353,10 @@
                 themeRuntime: themeRuntime,
                 imageLoader: modules.imageLoader,
             });
+            themeAssetsApi = modules.createThemeAssets({
+                load: load, esc: esc, toast: toast, createSheet: createSheet, closeSheet: closeSheet,
+                setBeforeClose: uiSheetsApi.setBeforeClose, backgrounds: function () { return backgroundsApi; },
+            });
             storageApi = modules.createStorage({
                 DB_NAME: DB_NAME,
                 DB_VERSION: DB_VERSION,
@@ -17330,6 +17644,7 @@
             if (d.themeMeta[name].thumbData === undefined) d.themeMeta[name].thumbData = null;
             if (d.themeMeta[name].crop === undefined) d.themeMeta[name].crop = null;
             if (d.themeMeta[name].backgroundName === undefined) d.themeMeta[name].backgroundName = '';
+            window.ThemeMgrModules.themeAssets.normalize(d.themeMeta[name]);
         });
         return d;
     }
@@ -17866,12 +18181,17 @@
         return backgroundsApi.applyBoundBackground(themeName, cb, isCurrent);
     }
 
-    function finishApplyTheme(themeName, cb, ok, requestId) {
+    function finishApplyTheme(themeName, cb, ok, requestId, selectedBackground) {
         return backgroundsApi.finishApplyTheme(themeName, function (backgroundOk, reason) {
             scheduleManagerAppearanceSync();
             if (avatarRuntime) avatarRuntime.scheduleReconcile(80);
-            if (cb) cb(backgroundOk, reason);
-        }, ok, requestId);
+            if (reason === 'superseded' || !themeRuntime.isApplyCurrent(requestId)) { if (cb) cb(false, 'superseded'); return; }
+            if (window.ThemeMgrDiagnostics) window.ThemeMgrDiagnostics.recordOperation('应用美化绑定背景', backgroundOk !== false, { theme: themeName, reason: reason || '', selected: selectedBackground || 'default' });
+            themeAssetsApi.sync(themeName, function () { return themeRuntime.isApplyCurrent(requestId); }).then(function (scriptResult) {
+                var finalReason = reason || (scriptResult && !scriptResult.ok ? 'scripts-failed' : undefined);
+                if (cb) cb(themeRuntime.isApplyCurrent(requestId) && backgroundOk !== false, themeRuntime.isApplyCurrent(requestId) ? finalReason : 'superseded');
+            });
+        }, ok, requestId, selectedBackground);
     }
 
     function setThemeControlValue(themeName) {
@@ -18050,6 +18370,14 @@
         document.addEventListener('change', function (e) {
             if (!e.target || e.target.id !== 'themes') return;
             var name = getThemeNameFromControl(e.target);
+            if (e.isTrusted && name && isStorageReady()) {
+                manualBackgroundIntent += 1;
+                setTimeout(function () {
+                    var isCurrent = function () { return getCurrentThemeName() === name; };
+                    if (!isCurrent()) return;
+                    applyBoundBackground(name, function () { if (isCurrent()) themeAssetsApi.sync(name, isCurrent); }, isCurrent);
+                }, 0);
+            }
             if (bindingController && name && !pendingVerifiedManualThemes[name] && !bindingController.isAutomatedThemeChange(name)) {
                 bindingController.recordManualTheme(name);
             }
@@ -18629,6 +18957,9 @@
         if (meta.author) out.author = meta.author;
         if (meta.description) out.description = meta.description;
         if (meta.backgroundName) out.backgroundName = meta.backgroundName;
+        if (meta.backgroundNames) out.backgroundNames = meta.backgroundNames.slice();
+        if (meta.defaultBackgroundName) out.defaultBackgroundName = meta.defaultBackgroundName;
+        if (meta.scriptBinding) out.scriptBinding = cloneJson(meta.scriptBinding);
         if (meta.imageData) out.imageData = meta.imageData;
         if (meta.thumbData) out.thumbData = meta.thumbData;
         if (meta.crop) out.crop = meta.crop;
@@ -19127,7 +19458,8 @@
             });
     }
 
-    function applyTheme(themeName, cb) {
+    function applyTheme(themeName, cb, selectedBackground) {
+        manualBackgroundIntent += 1;
         themeRuntime.applyThemeAndWait(
             themeName,
             function (prepared, requestId, isCurrent) {
@@ -19154,7 +19486,7 @@
                     if (cb) cb(true, 'visual-failed');
                     return;
                 }
-                finishApplyTheme(themeName, cb, true, result.requestId);
+                finishApplyTheme(themeName, cb, true, result.requestId, selectedBackground);
             })
             .catch(function (err) {
                 console.warn('[美化管理] 切换美化失败:', err);
@@ -19166,7 +19498,19 @@
         if (bindingController) bindingController.recordManualTheme(themeName);
     }
 
+    function confirmThemeSwitch(displayName) {
+        return global.confirm('确认切换到美化「' + String(displayName || '') + '」吗？');
+    }
+
     function applyManualTheme(themeName, cb) {
+        var intent = ++manualBackgroundIntent;
+        themeAssetsApi.chooseBackground(peekMeta(load(), themeName)).then(function (background) {
+            if (intent !== manualBackgroundIntent) { if (cb) cb(false, 'superseded'); return; }
+            applyManualThemeWithBackground(themeName, cb, background);
+        });
+    }
+
+    function applyManualThemeWithBackground(themeName, cb, background) {
         var intentToken = bindingController && typeof bindingController.beginManualIntent === 'function'
             ? bindingController.beginManualIntent(themeName)
             : null;
@@ -19180,7 +19524,7 @@
                 recordManualTheme(themeName);
             }
             if (cb) cb(ok, reason, error);
-        });
+        }, background);
     }
 
     function handleBindingApplyError(themeName, reason, resolution) {
@@ -20769,11 +21113,14 @@
             categories: Array.isArray(library.categories) ? library.categories.slice() : [],
             meta: library.meta && typeof library.meta === 'object' ? cloneJson(library.meta) : {},
             themeBindings: {},
+            themeBackgroundPools: {},
             settings: { backgroundColumns: Number(current.backgroundColumns) || 3 },
         };
         Object.keys(current.themeMeta || {}).forEach(function (theme) {
             var backgroundName = current.themeMeta[theme] && current.themeMeta[theme].backgroundName;
             if (typeof backgroundName === 'string' && backgroundName) payload.themeBindings[theme] = backgroundName;
+            var normalized = window.ThemeMgrModules.themeAssets.normalize(Object.assign({}, current.themeMeta[theme]));
+            if (normalized.backgroundNames.length) payload.themeBackgroundPools[theme] = { backgroundNames: normalized.backgroundNames, defaultBackgroundName: normalized.defaultBackgroundName };
         });
         downloadJsonBlob('theme-manager-background-annotations-' + new Date().toISOString().slice(0, 10) + '.json', payload);
         toast('✅ 已导出背景标注：分类、收藏、绑定和显示设置；不包含图片');
@@ -20790,7 +21137,11 @@
                 current.backgroundLibrary = { categories: Array.from(new Set((Array.isArray(library.categories) ? library.categories : []).concat(Array.isArray(imported.categories) ? imported.categories : []))), meta: Object.assign({}, library.meta || {}, imported.meta || {}) };
                 var bindings = imported.themeBindings && typeof imported.themeBindings === 'object' ? imported.themeBindings : {};
                 current.themeMeta = current.themeMeta && typeof current.themeMeta === 'object' ? current.themeMeta : {};
-                Object.keys(bindings).forEach(function (theme) { current.themeMeta[theme] = Object.assign({}, current.themeMeta[theme] || {}, { backgroundName: bindings[theme] }); });
+                var pools = imported.themeBackgroundPools || {};
+                Array.from(new Set(Object.keys(bindings).concat(Object.keys(pools)))).forEach(function (theme) {
+                    var incoming = pools[theme] && Array.isArray(pools[theme].backgroundNames) ? pools[theme] : { backgroundName: bindings[theme] };
+                    current.themeMeta[theme] = window.ThemeMgrModules.themeAssets.merge(Object.assign({}, current.themeMeta[theme] || {}), incoming);
+                });
                 if (imported.settings && Number.isFinite(Number(imported.settings.backgroundColumns))) current.backgroundColumns = Math.max(1, Math.min(6, Number(imported.settings.backgroundColumns)));
                 return save(current);
             }).then(function () { refreshBackgroundPage(); toast('✅ 背景标注导入完成：分类、收藏、绑定和显示设置已合并'); }).catch(function (error) { toast('背景标注导入失败：' + error.message, true); });
@@ -21050,7 +21401,7 @@
         var categoryHtml = '<div class="tm-field"><label>分类</label><select data-category><option value="">未分类</option>' + state.categories.map(function (category) {
             return '<option value="' + esc(category) + '"' + (meta.category === category ? ' selected' : '') + '>' + esc(category) + '</option>';
         }).join('') + '</select></div><button class="tm-btn tm-btn-outline" data-action="star">' + (meta.starred ? '取消收藏' : '收藏背景') + '</button>';
-        var boundCount = Object.keys(state.data.themeMeta || {}).filter(function (theme) { return state.data.themeMeta[theme].backgroundName === name; }).length;
+        var boundCount = Object.keys(state.data.themeMeta || {}).filter(function (theme) { return window.ThemeMgrModules.themeAssets.names(state.data.themeMeta[theme]).indexOf(name) !== -1; }).length;
         var sheet = createSheet('<div class="tm-sheet-title"><i class="fa-solid fa-pen"></i>编辑背景</div>' +
             '<div class="tm-field"><label>背景名称</label><div class="tm-bg-edit-name">' + esc(name) + '</div></div>' +
             buildDisclosureHtml('tm-bg-edit-meta', '标注信息', 'fa-note-sticky', categoryHtml) +
@@ -21069,12 +21420,12 @@
         }).catch(function () { if (sheet.isConnected) preview.src = 'backgrounds/' + encodeURIComponent(name); });
         var visibleLimit = 10;
         function renderBindings() {
-            var current = load(), bound = Object.keys(current.themeMeta || {}).filter(function (theme) { return current.themeMeta[theme].backgroundName === name; });
+            var current = load(), bound = Object.keys(current.themeMeta || {}).filter(function (theme) { return window.ThemeMgrModules.themeAssets.names(current.themeMeta[theme]).indexOf(name) !== -1; });
             var query = sheet.querySelector('[data-bind-search]').value.trim().toLowerCase();
             var options = query ? stThemeList.filter(function (theme) { return !bound.includes(theme) && theme.toLowerCase().includes(query); }) : [];
             sheet.querySelector('[data-bind-options]').innerHTML = query ? options.slice(0, visibleLimit).map(function (theme) {
                 var existing = (current.themeMeta[theme] || {}).backgroundName;
-                return '<button type="button" class="tm-bg-bind-row" data-bind-theme="' + esc(theme) + '"><span>' + esc(theme) + (existing ? '<small>已绑定其他背景，点击替换</small>' : '') + '</span><i class="fa-solid fa-plus"></i></button>';
+                return '<button type="button" class="tm-bg-bind-row" data-bind-theme="' + esc(theme) + '"><span>' + esc(theme) + (existing ? '<small>已绑定其他背景，点击追加</small>' : '') + '</span><i class="fa-solid fa-plus"></i></button>';
             }).join('') + (options.length > visibleLimit ? '<button type="button" class="tm-btn tm-btn-outline" data-bind-more>显示更多美化</button>' : options.length ? '' : '<p class="tm-hint">没有匹配的美化</p>') : '<p class="tm-hint tm-bind-empty">输入名称后显示匹配的美化</p>';
             sheet.querySelector('[data-bound]').innerHTML = '<div class="tm-storage-info">已绑定 ' + bound.length + ' 个美化</div>' + (bound.length ? bound.map(function (theme) {
                 return '<div class="tm-bg-bind-row"><span>' + esc(theme) + '</span><button type="button" class="tm-btn tm-btn-outline" data-unbind="' + esc(theme) + '">解除</button></div>';
@@ -21088,13 +21439,17 @@
             var binding = button.hasAttribute('data-bind-theme');
             var theme = binding ? button.dataset.bindTheme : button.dataset.unbind;
             var current = load(); current.themeMeta = current.themeMeta || {};
-            var previous = (current.themeMeta[theme] || {}).backgroundName;
-            if (binding && previous && previous !== name && !global.confirm('该美化已绑定其他背景，替换为当前背景？')) return;
+            // Append this background while preserving the existing default and order.
             button.disabled = true;
-            current.themeMeta[theme] = Object.assign({}, current.themeMeta[theme], { backgroundName: binding ? name : '' });
+            var boundMeta = Object.assign({}, current.themeMeta[theme]);
+            window.ThemeMgrModules.themeAssets.normalize(boundMeta);
+            boundMeta.backgroundNames = boundMeta.backgroundNames.filter(function (item) { return item !== name; });
+            if (binding) boundMeta.backgroundNames.push(name);
+            window.ThemeMgrModules.themeAssets.normalize(boundMeta);
+            current.themeMeta[theme] = boundMeta;
             Promise.resolve(save(current)).then(function () {
                 if (sheet.isConnected) renderBindings();
-                if (binding && getCurrentThemeName() === theme) backgroundsApi.applyBoundBackground(theme);
+                if (getCurrentThemeName() === theme) backgroundsApi.applyBoundBackground(theme);
                 toast(binding ? '已绑定美化' : '已解除绑定');
             }).catch(function () { button.disabled = false; toast('绑定保存失败', true); });
         });
@@ -22410,6 +22765,7 @@
                 return;
             }
             var themeName = getItemDisplayTheme(d, item);
+            if (!confirmThemeSwitch(item.name || themeName)) return;
             applyManualTheme(themeName, function (ok, reason, error) {
                 if (ok) {
                     if (global.ThemeMgrDiagnostics) global.ThemeMgrDiagnostics.recordOperation('切换美化「' + item.name + '」', true);
@@ -22420,7 +22776,7 @@
                     meta.useCount = (meta.useCount || 0) + 1;
                     meta.lastUsed = Date.now();
                     save(dd);
-                    toast('✅ 已应用：' + item.name);
+                    toast((reason === 'scripts-failed' ? '美化已应用，部分脚本绑定未完成（详情见日志）：' : '✅ 已应用：') + item.name, reason === 'scripts-failed');
                     refreshSingleItemCard(item.key, { recent: true, freq: true });
                     renderBottomStatus();
                     updateBtn();
@@ -23628,6 +23984,9 @@
                     thumbData: variantMeta.thumbData || null,
                     crop: variantMeta.crop || null,
                     backgroundName: variantMeta.backgroundName || '',
+                    backgroundNames: window.ThemeMgrModules.themeAssets.names(variantMeta),
+                    defaultBackgroundName: variantMeta.defaultBackgroundName || variantMeta.backgroundName || '',
+                    scriptBinding: cloneJson(variantMeta.scriptBinding || null),
                 };
             });
         } else {
@@ -23638,6 +23997,9 @@
                 thumbData: ordinaryMeta.thumbData || null,
                 crop: ordinaryMeta.crop || null,
                 backgroundName: ordinaryMeta.backgroundName || '',
+                backgroundNames: window.ThemeMgrModules.themeAssets.names(ordinaryMeta),
+                defaultBackgroundName: ordinaryMeta.defaultBackgroundName || ordinaryMeta.backgroundName || '',
+                scriptBinding: cloneJson(ordinaryMeta.scriptBinding || null),
             };
         }
         var activeDraft = variantDrafts[selectedVariant] || variantDrafts.day;
@@ -23649,6 +24011,7 @@
         var editCategory = meta.category || '';
         var editTags = (meta.tags || []).slice();
         var editBackgroundName = activeDraft.backgroundName;
+        var editAssets = cloneJson(activeDraft);
         var itemTarget = getItemTarget(item);
         function buildBindingsOverviewHtml() {
             var refs = bindingsApi ? bindingsApi.listTargetReferences(load(), itemTarget) : { characters: [], chats: [] };
@@ -23689,6 +24052,7 @@
         }
         var bindingFieldsHtml =
             '<div class="tm-field"><label>绑定背景</label><button type="button" class="tm-bg-bind-card" id="tm-bg-bind">' + buildBackgroundBindHtml(editBackgroundName) + '</button></div>' +
+            '<div class="tm-field"><label>酒馆助手脚本</label><button type="button" class="tm-btn tm-btn-outline" id="tm-script-bind">绑定脚本</button></div>' +
             '<div class="tm-field"><label>角色 / 聊天绑定</label><button type="button" class="tm-theme-bind-card" id="tm-theme-bind-overview">' + buildBindingsOverviewHtml() + '</button></div>' +
             '<div class="tm-field"><label>头像绑定</label><button type="button" class="tm-theme-bind-card" id="tm-avatar-bind-overview"><span class="tm-theme-bind-icon"><i class="fa-solid fa-users"></i></span><span class="tm-theme-bind-copy"><strong>头像绑定</strong><small>正在读取头像绑定…</small></span><i class="fa-solid fa-chevron-right tm-theme-bind-chevron"></i></button></div>';
         var annotationFieldsHtml =
@@ -23723,15 +24087,27 @@
         sheet.classList.add('tm-sheet-tall');
 
         function renderBackgroundBind() {
-            sheet.querySelector('#tm-bg-bind').innerHTML = buildBackgroundBindHtml(editBackgroundName);
+            window.ThemeMgrModules.themeAssets.normalize(editAssets);
+            editBackgroundName = editAssets.backgroundName;
+            sheet.querySelector('#tm-bg-bind').innerHTML = backgroundsApi.buildBackgroundBindHtml(editBackgroundName, { selectedHint: '已绑定 ' + editAssets.backgroundNames.length + ' 张 · 点击管理 / 设置默认' });
+            var count = editAssets.scriptBinding && editAssets.scriptBinding.scripts ? editAssets.scriptBinding.scripts.length : 0;
+            sheet.querySelector('#tm-script-bind').textContent = count ? '已绑定 ' + count + ' 个脚本 · 点击管理' : '绑定酒馆助手脚本';
         }
         sheet.querySelector('#tm-bg-bind').addEventListener('click', function () {
-            openBackgroundPickerSheet(editBackgroundName, function (name) {
-                if (!editorSession || !editorSession.isActive() || editorSession.isSaving()) return;
-                editBackgroundName = name || '';
-                renderBackgroundBind();
+            if (editorSession && editorSession.isSaving()) return;
+            var target = editAssets;
+            themeAssetsApi.editBackgrounds(target, function () { if (target === editAssets && sheet.isConnected) renderBackgroundBind(); });
+        });
+        sheet.querySelector('#tm-script-bind').addEventListener('click', function () {
+            if (editorSession && editorSession.isSaving()) return;
+            var target = editAssets;
+            themeAssetsApi.editScripts(target.scriptBinding, function (binding) {
+                if (!sheet.isConnected || (editorSession && editorSession.isSaving())) return;
+                target.scriptBinding = binding;
+                if (target === editAssets) renderBackgroundBind();
             });
         });
+        renderBackgroundBind();
         function renderBindingsOverview() {
             var button = sheet.querySelector('#tm-theme-bind-overview');
             if (button) button.innerHTML = buildBindingsOverviewHtml();
@@ -23957,6 +24333,9 @@
             draft.thumbData = editThumbData;
             draft.crop = editCrop;
             draft.backgroundName = editBackgroundName;
+            draft.backgroundNames = editAssets.backgroundNames.slice();
+            draft.defaultBackgroundName = editAssets.defaultBackgroundName;
+            draft.scriptBinding = cloneJson(editAssets.scriptBinding || null);
         }
         function captureEditSnapshot() {
             captureVariantDraft();
@@ -23974,6 +24353,7 @@
             if (!draft) return;
             selectedVariant = variant;
             themeName = draft.themeName;
+            editAssets = cloneJson(draft);
             editBackgroundName = draft.backgroundName || '';
             editImgData = draft.imageData || null;
             editThumbData = draft.thumbData || null;
@@ -24173,6 +24553,9 @@
                             thumbData: draft.thumbData ? (thumbUrl || draft.thumbData) : null,
                             crop: draft.crop || null,
                             backgroundName: draft.backgroundName || '',
+                            backgroundNames: draft.backgroundNames.slice(),
+                            defaultBackgroundName: draft.defaultBackgroundName || '',
+                            scriptBinding: cloneJson(draft.scriptBinding || null),
                         });
                     });
                 });
@@ -24253,6 +24636,9 @@
                         var result = uploaded[variant];
                         var variantMeta = ensureMeta(dd, result.themeName);
                         variantMeta.backgroundName = result.backgroundName;
+                        variantMeta.backgroundNames = result.backgroundNames;
+                        variantMeta.defaultBackgroundName = result.defaultBackgroundName;
+                        variantMeta.scriptBinding = result.scriptBinding;
                         variantMeta.imageData = result.imageData;
                         variantMeta.thumbData = result.thumbData;
                         variantMeta.crop = result.crop;
@@ -24260,6 +24646,9 @@
                 } else {
                     var ordinary = uploaded.day;
                     shared.backgroundName = ordinary.backgroundName;
+                    shared.backgroundNames = ordinary.backgroundNames;
+                    shared.defaultBackgroundName = ordinary.defaultBackgroundName;
+                    shared.scriptBinding = ordinary.scriptBinding;
                     shared.imageData = ordinary.imageData;
                     shared.thumbData = ordinary.thumbData;
                     shared.crop = ordinary.crop;
@@ -24273,6 +24662,7 @@
                 }
                 Promise.resolve(persist).then(function () {
                     if (!editorSession.completeSave(saveTicket.token, saveTicket.snapshot)) return;
+                    if (window.ThemeMgrDiagnostics) window.ThemeMgrDiagnostics.recordOperation('保存美化背景与脚本绑定', true, { themes: refreshedItem.themeNames.slice() });
                     closeSheet(sheet, { force: true });
                     var editEffects = {
                         name: requestedName !== originalEditName,
@@ -24282,6 +24672,7 @@
                     };
                     var currentTheme = getCurrentThemeName();
                     if (refreshedItem.themeNames.indexOf(currentTheme) !== -1) {
+                        themeAssetsApi.sync(currentTheme, function () { return getCurrentThemeName() === currentTheme; });
                         applyBoundBackground(currentTheme, function () {
                             toast('✨ 已保存');
                             renderCatbar(); refreshSingleItemCard(refreshedItem.key, editEffects); renderBottomStatus();
@@ -24322,7 +24713,7 @@
                 if (!Array.isArray(existing.tags)) existing.tags = [];
                 imageToolsApi.mergeMissingPreview(existing, imp);
                 if (!existing.category && imp.category) existing.category = imp.category;
-                if (!existing.backgroundName && imp.backgroundName) existing.backgroundName = imp.backgroundName;
+                window.ThemeMgrModules.themeAssets.merge(existing, imp);
                 if (imp.tags) imp.tags.forEach(function (t) { if (existing.tags.indexOf(t) === -1) existing.tags.push(t); });
                 if (!existing.author && imp.author) existing.author = imp.author;
                 if (!existing.description && imp.description) existing.description = imp.description;
@@ -25688,6 +26079,8 @@
         if (eventsApi) eventsApi.startFabInjection();
 
         initStorage(function (d) {
+            var assetTheme = getCurrentThemeName();
+            if (assetTheme && !avatarRecoveryGateLocked) themeAssetsApi.sync(assetTheme, function () { return getCurrentThemeName() === assetTheme; });
             if (eventsApi && typeof eventsApi.syncFabVisibility === 'function') eventsApi.syncFabVisibility(d);
             bindColorSchemeListener();
             if (bindingController && !avatarRecoveryGateLocked) bindingController.start();
